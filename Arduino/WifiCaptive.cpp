@@ -1,4 +1,5 @@
 #include "WifiCaptive.h"
+#include <WiFi.h>
 #include "config.h"
 
 void WifiCaptive::setUpDNSServer(DNSServer &dnsServer, const IPAddress &localIP)

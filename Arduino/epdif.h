@@ -28,13 +28,31 @@
 #ifndef EPDIF_H
 #define EPDIF_H
 
-#include <arduino.h>
+#include <Arduino.h>
+#include "hardware_profile.h"
 
-// Pin definition
+#if EPF_HARDWARE_PROFILE == EPF_PROFILE_EE04_EPAPER
+// Seeed XIAO ePaper Display Board EE04, from the official schematic.
+#define BUSY_PIN 4
+#define RST_PIN 38
+#define DC_PIN 10
+#define CS_PIN 44
+#define SCK_PIN 7
+#define MOSI_PIN 9
+#define MISO_PIN 8
+#define EPD_POWER_PIN 43
+#else
+// Kept valid so the e-paper translation unit can still be compiled for the
+// OLED profile; it is never initialized in that profile.
 #define BUSY_PIN 18
 #define RST_PIN 14
 #define DC_PIN 8
-#define CS_PIN 1
+#define CS_PIN 5
+#define SCK_PIN 18
+#define MOSI_PIN 23
+#define MISO_PIN 19
+#define EPD_POWER_PIN -1
+#endif
 
 class EpdIf
 {

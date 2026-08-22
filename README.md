@@ -25,11 +25,13 @@ Mostly modifieded from TRMNL WiFiCaptive[https://github.com/usetrmnl/firmware/tr
 
 ## Components
 
-- [FireBeetle 2 ESP32-C6](https://www.dfrobot.com/product-2771.html)
-- [7.3-inch E Ink Spectra 6 (E6) Full Color E-Paper Display Module + HAT](https://www.waveshare.com/7.3inch-e-paper-hat-e.htm)
+- ESP-WROOM-32 development board for the prototype
+- Small 128x32 SSD1306 I2C OLED
+- Seeed XIAO ePaper Display Board EE04 (ESP32-S3) for the final build
+- Seeed 7.3-inch Spectra 6 e-paper display
 - Picture frame: A standard picture frame that accommodates the e-paper frame.
 - Li-Po battery with PH2.0 header
-- Simple button for wake and setting
+- EE04's built-in user buttons for wake and setup
 
 ## Installation
 
@@ -97,24 +99,40 @@ immich:
 ```
 </details>
 
-### ESP32-C6
+### Hardware profiles
 
-Connect the EPD, ESP32-C6, Li-Po battery, and setting button according to the correct wiring configuration. 
-To run the code follow the following steps:
+The Arduino firmware now uses a compile-time hardware profile so the same EPF
+logic can be exercised on the temporary OLED hardware and later moved to the
+EE04 e-paper board.
 
-1. Install and set up Arduino IDE
-2. Connect your ESP32-C6
-3. Rename the Arduino folder from the repo to `epd7in3e`
-4. Open the `epd7in3e.ino` file
-5. Install following libraries from Arduino library manager:
-  5-1. Arduinojson
-  5-2. Async TCP
-  5-3. ESP Async Web Server
-6. Click 'Upload'
-7. Connect to the Wifi AP created by the ESP32, named `ESP32_ePAPER`
-8. A captive portal shows up allowing to enter your WiFi details and details of the Docker container (e.g. http://192.168.100.10:15151)
+| Profile | Board/display | Selection |
+| --- | --- | --- |
+| `prototype_oled` | ESP-WROOM-32 + 128x32 SSD1306 OLED | default PlatformIO environment |
+| `ee04_epaper` | Seeed XIAO ePaper Display Board EE04 + 7.3-inch Spectra 6 | future target |
 
-You can re-enter the configuration page later by short-circuiting the setting button at least 5 second while rebooting.
+For the OLED prototype, connect GND to GND, VCC to 3V3, SDA to GPIO21 and
+SCL/SCK to GPIO22. The OLED shows boot, Wi-Fi, fetch and completion status;
+it deliberately does not decode or display images. Deep sleep and battery
+measurement are disabled in this profile so the result remains visible while
+testing.
+
+The EE04 profile uses the board's routed display signals: BUSY GPIO4, DC
+GPIO10, RESET GPIO38, CS GPIO44, SCK GPIO7, MOSI GPIO9 and panel power enable
+GPIO43. Set the EE04 jumper to 50-pin before connecting the Spectra 6 panel,
+and verify the FPC orientation before powering it.
+
+### PlatformIO builds
+
+From the EPF repository:
+
+```text
+pio run -e prototype_oled
+pio run -e ee04_epaper
+```
+
+The Arduino IDE path remains available and uses the EE04 profile by default.
+When using the OLED prototype in Arduino IDE, add
+`-DEPF_HARDWARE_PROFILE=EPF_PROFILE_PROTOTYPE_OLED` to the board build flags.
 
 ## License
 

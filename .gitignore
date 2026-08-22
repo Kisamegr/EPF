@@ -1,9 +1,2 @@
-# Holds IMMICH_API_KEY for docker-compose
-.env
-
-# Runtime data created by the docker-compose bind mounts
-/config/
-/photos/
-
-__pycache__/
-*.py[cod]
+.pio/
+.vscode/

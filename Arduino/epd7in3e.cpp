@@ -340,6 +340,9 @@ void Epd::Sleep(void)
     SendData(0xA5);
     DelayMs(10);
     DigitalWrite(RST_PIN, 0); // Reset
+#if EPD_POWER_PIN >= 0
+    DigitalWrite(EPD_POWER_PIN, LOW);
+#endif
 }
 
 /* END OF FILE */

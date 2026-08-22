@@ -1,7 +1,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <HTTPClient.h>
+#include "hardware_profile.h"
+#if EPF_USE_EPAPER
 #include "epd7in3e.h"
+#endif
 #include "FS.h"
 #include <ArduinoJson.h>
 // #include "SimpleWiFiManager.h"
@@ -12,19 +15,9 @@
 #include <Preferences.h>
 #include <WifiCaptive.h>
 #include <filesystem.h>
-
-/* Pin Layout Description
-DRIVER BOARD  <>  FireBeetle ESP32-C6
-BUSY          <>  18  // E-paper busy signal input
-RST           <>  14  // E-paper reset control
-DC            <>  8   // Data/Command control
-CS            <>  1   // Chip select control
-SCLK          <>  23  // SPI clock
-DIN           <>  22  // SPI data input
-GND           <>  GND // Ground
-VCC           <>  3V3 // Power supply
-SETTING       <>  2  // Configuration mode trigger pin
-*/
+#if EPF_USE_OLED
+#include "oled_status.h"
+#endif
 
 Preferences preferences;
 
@@ -32,13 +25,40 @@ class EpaperManager
 {
 private:
   // SimpleWiFiManager wifiManager;
+#if EPF_USE_EPAPER
   Epd epd;
+#endif
+#if EPF_USE_OLED
+  OledStatus oled;
+#endif
   String imageUrl = "";
+  int requestedSleepSeconds = 0;
+
+  void showStatus(const String &line1, const String &line2 = String())
+  {
+#if EPF_USE_OLED
+    oled.show(line1, line2);
+#endif
+    Serial.print("[status] ");
+    Serial.print(line1);
+    if (line2.length() > 0)
+    {
+      Serial.print(" | ");
+      Serial.print(line2);
+    }
+    Serial.println();
+  }
 
   bool downloadImage()
   {
-    // preferences.begin("data, true");
-    imageUrl = preferences.getString("SERVER_BASE_URL");
+    imageUrl = preferences.getString("SERVER_BASE_URL", SERVER_BASE_URL);
+    if (imageUrl.length() == 0)
+    {
+      showStatus("No server URL", "Configure portal");
+      return false;
+    }
+
+    showStatus("Fetching image", imageUrl);
     Serial.print("nas url: ");
     Serial.println(imageUrl);
     bool isHttps = imageUrl.startsWith("https://");
@@ -78,20 +98,24 @@ private:
       }
     }
 
-    // Add battery voltage to header
+    // Add battery voltage to the request when the selected board exposes a
+    // battery monitor. The USB-powered OLED prototype deliberately omits it.
+    int batteryVoltage = 0;
+#if EPF_HAS_BATTERY_MONITOR
     analogReadResolution(12);
     int plusV = 0;
-    for (int i = 0; i < 50; i++)
+    for (int i = 0; i < 10; i++)
     {
-      plusV += analogReadMilliVolts(0);
+      plusV += analogReadMilliVolts(BATTERY_ADC_PIN);
       delay(5);
     }
-    int batteryVoltage = (plusV / 50) * 2;
+    batteryVoltage = (plusV / 10) * 2;
+#endif
     http.addHeader("batteryCap", String(batteryVoltage));
 
     // Download and process image
     bool success = false;
-    int sleepDuration = 0;
+    requestedSleepSeconds = 0;
     bool retryOnError = true; // Add retry flag
 
     while (retryOnError && !success)
@@ -136,10 +160,10 @@ private:
 
               if (!error)
               {
-                sleepDuration = doc["sleep_duration"] | 0;
-                if (sleepDuration > 0)
+                requestedSleepSeconds = doc["sleep_duration"] | 0;
+                if (requestedSleepSeconds > 0)
                 {
-                  sleepDuration /= 1000; // Convert to seconds
+                  requestedSleepSeconds /= 1000; // Convert to seconds
                 }
               }
             }
@@ -181,17 +205,8 @@ private:
     if (basicClient)
       delete basicClient;
 
-    // If we got a valid sleep duration, use it for hibernation
-    if (success && sleepDuration > 0)
-    {
-      hibernate(sleepDuration);
-    }
-    else
-    {
-      // Use default sleep duration if server didn't provide one
-      hibernate();
-    }
-
+    showStatus(success ? "Image received" : "Image fetch failed",
+               success ? "Endpoint OK" : "Check server");
     return success;
   }
 
@@ -222,9 +237,12 @@ private:
     Serial.printf("Content-Length: %d bytes\n", contentLength);
     Serial.println("Starting direct image processing...");
 
+#if EPF_USE_EPAPER
     epd.SendCommand(0x10);
+#endif
 
-    uint8_t *buffer = (uint8_t *)malloc(BUFFER_SIZE);
+    const size_t bufferSize = EPF_USE_OLED ? 512U : BUFFER_SIZE;
+    uint8_t *buffer = (uint8_t *)malloc(bufferSize);
     if (buffer == NULL)
     {
       Serial.println("Buffer allocation failed");
@@ -236,7 +254,7 @@ private:
 
     while (contentLength > 0 && http->connected())
     {
-      int bytesToRead = min(contentLength, (int)sizeof(buffer));
+      int bytesToRead = min(contentLength, (int)bufferSize);
       int bytesRead = stream->readBytes(buffer, bytesToRead);
 
       if (bytesRead > 0)
@@ -249,7 +267,9 @@ private:
             if (!hexBuffer.isEmpty())
             {
               uint8_t byteValue = (uint8_t)strtol(hexBuffer.c_str(), nullptr, 16);
+#if EPF_USE_EPAPER
               epd.SendData(byteValue);
+#endif
               hexBuffer.clear();
             }
           }
@@ -277,13 +297,17 @@ private:
     if (!hexBuffer.isEmpty())
     {
       uint8_t byteValue = (uint8_t)strtol(hexBuffer.c_str(), nullptr, 16);
+#if EPF_USE_EPAPER
       epd.SendData(byteValue);
+#endif
     }
 
     free(buffer);
-    Serial.println("Showing image");
+    Serial.println("Image data received");
+#if EPF_USE_EPAPER
     epd.TurnOnDisplay();
     epd.Sleep();
+#endif
 
     return true;
   }
@@ -326,7 +350,7 @@ private:
     rtc_gpio_set_direction(WAKEUP_PIN, RTC_GPIO_MODE_INPUT_ONLY);
     rtc_gpio_pullup_en(WAKEUP_PIN);
     rtc_gpio_pulldown_dis(WAKEUP_PIN);
-    esp_sleep_enable_ext1_wakeup(1ULL << WAKEUP_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_sleep_enable_ext1_wakeup(1ULL << WAKEUP_PIN, EPF_EXT1_WAKEUP_MODE);
 
     // Wait for serial output to complete
     Serial.println("Entering deep sleep mode...");
@@ -350,6 +374,9 @@ private:
   // Check if configuration mode should be entered
   bool shouldEnterConfigMode()
   {
+#if !EPF_HAS_CONFIG_BUTTON
+    return false;
+#else
     // Check configuration pin with debounce
     // if (digitalRead(CONFIG_PIN) == LOW) {
     //   delay(BUTTON_DEBOUNCE);
@@ -358,6 +385,7 @@ private:
     // return false;
     Button button(CONFIG_PIN);
     return button.result();
+#endif
   }
 
 public:
@@ -365,6 +393,16 @@ public:
   {
     Serial.begin(115200);
     delay(50);
+    Serial.println(F("Starting EPF hardware profile"));
+
+#if EPF_USE_OLED
+    if (!oled.begin())
+    {
+      Serial.println(F("OLED init failed"));
+      return false;
+    }
+    showStatus("EPF prototype", "OLED ready");
+#else
     pinMode(CONFIG_PIN, INPUT_PULLUP);
 
     if (epd.Init() != 0)
@@ -373,12 +411,15 @@ public:
       return false;
     }
     Serial.println(F("e-Paper initialized successfully"));
+#endif
 
+#if EPF_USE_EPAPER
     // initialize spiffs
     fs_init();
+#endif
 
     // initialize preferences
-    preferences.begin("data", true);
+    preferences.begin("data", false);
 
     WiFi.mode(WIFI_STA);
 
@@ -386,7 +427,10 @@ public:
     if (shouldEnterConfigMode())
     {
       Serial.println(F("Config button pressed, entering config mode..."));
+      showStatus("WiFi setup", "Open frame AP");
+#if EPF_USE_EPAPER
       epd.Clear(EPD_7IN3E_WHITE);
+#endif
       // epd.Sleep();
 
       bool res = WifiCaptivePortal.startPortal();
@@ -405,9 +449,11 @@ public:
     // If button not pressed, try normal startup
     if (WifiCaptivePortal.isSaved())
     {
+      showStatus("Connecting WiFi", "Saved network");
       int connection_res = WifiCaptivePortal.autoConnect();
       if (connection_res)
       {
+        showStatus("WiFi connected", WiFi.localIP().toString());
         preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
         return true;
       }
@@ -418,6 +464,7 @@ public:
     }
     else
     {
+      showStatus("WiFi setup", "Open frame AP");
       WifiCaptivePortal.setResetSettingsCallback(resetDeviceCredentials);
       bool res = WifiCaptivePortal.startPortal();
       if (res)
@@ -452,18 +499,32 @@ public:
     }
     else
     {
+      showStatus("WiFi offline", "Retry after reset");
       Serial.println(F("WiFi not connected. Cannot download image"));
     }
 
+    Serial.println(F("Update completed"));
+#if EPF_ENABLE_DEEP_SLEEP
     Serial.println(F("Entering sleep mode"));
-    hibernate();
+    hibernate(requestedSleepSeconds);
+#else
+    showStatus("Prototype ready", "Logic path complete");
+#endif
   }
 
   // Check battery voltage level
   bool checkVoltage()
   {
+#if !EPF_HAS_BATTERY_MONITOR
+    Serial.println(F("Battery check skipped for USB OLED prototype"));
+    return true;
+#else
+#if BATTERY_ADC_ENABLE_PIN >= 0
+    pinMode(BATTERY_ADC_ENABLE_PIN, OUTPUT);
+    digitalWrite(BATTERY_ADC_ENABLE_PIN, HIGH);
+#endif
     analogReadResolution(12);
-    int analogVolts = analogReadMilliVolts(0);
+    int analogVolts = analogReadMilliVolts(BATTERY_ADC_PIN);
     // Multiply by 2 due to voltage divider
     Serial.print("BAT millivolts value = ");
     Serial.print(analogVolts * 2);
@@ -475,15 +536,20 @@ public:
       return false;
     }
     return true;
+#endif
   }
 
   // Clear the e-paper display
   void clearScreen()
   {
+#if EPF_USE_EPAPER
     epd.Init();
     delay(1000);
     epd.Clear(EPD_7IN3E_WHITE);
     epd.Sleep();
+#else
+    showStatus("Display clear", "OLED status mode");
+#endif
   }
 };
 
@@ -516,8 +582,12 @@ void setup()
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(1000);
+#if EPF_ENABLE_DEEP_SLEEP
     esp_sleep_enable_timer_wakeup(86400 * 1000000ULL);
     esp_deep_sleep_start();
+#else
+    return;
+#endif
   }
   if (epaperManager.begin())
   {
