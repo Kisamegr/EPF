@@ -402,6 +402,13 @@ def process_and_download():
 
         response = send_file(c_code, mimetype='text/plain', as_attachment=True,
                              download_name=f"image_{asset_id}.c")
+        # The OLED emulator uses this header to show the original photo name
+        # while still consuming the same prepared panel payload as the frame.
+        photo_name = selected.get('originalFileName') or f"image_{asset_id}"
+        photo_name = str(photo_name).replace('\r', ' ').replace('\n', ' ')
+        response.headers['X-Photo-Name'] = photo_name.encode(
+            'ascii', 'replace'
+        ).decode('ascii')
         # Deep link for writing an NFC tag; the firmware does not read it yet
         response.headers['X-Photo-Url'] = \
             f"https://my.immich.app/albums/{albumid}/photos/{asset_id}"

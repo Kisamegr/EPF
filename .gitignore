@@ -1,2 +1,6 @@
 .pio/
 .vscode/
+.env
+photos/events.jsonl
+photos/tracking.txt
+config/config.yaml

@@ -32,6 +32,7 @@ private:
   OledStatus oled;
 #endif
   String imageUrl = "";
+  String receivedImageName = "";
   int requestedSleepSeconds = 0;
 
   void showStatus(const String &line1, const String &line2 = String())
@@ -51,7 +52,14 @@ private:
 
   bool downloadImage()
   {
-    imageUrl = preferences.getString("SERVER_BASE_URL", SERVER_BASE_URL);
+    receivedImageName = "";
+    // An empty saved preference must not hide the compile-time default. This
+    // can happen when the captive portal was submitted without a server URL.
+    imageUrl = preferences.getString("SERVER_BASE_URL", "");
+    if (imageUrl.length() == 0)
+    {
+      imageUrl = SERVER_BASE_URL;
+    }
     if (imageUrl.length() == 0)
     {
       showStatus("No server URL", "Configure portal");
@@ -72,6 +80,9 @@ private:
     String baseUrl = imageUrl;
     const char *downloadPath = "/download";
     const char *sleepPath = "/sleep";
+
+    const char *responseHeaders[] = {"X-Photo-Name"};
+    http.collectHeaders(responseHeaders, 1);
 
     String sleepUrl = baseUrl + sleepPath;
 
@@ -128,6 +139,7 @@ private:
 
         if (httpCode == HTTP_CODE_OK)
         {
+          receivedImageName = http.header("X-Photo-Name");
           success = processImageData(&http);
 
           // After successful image download, get sleep duration
@@ -206,7 +218,9 @@ private:
       delete basicClient;
 
     showStatus(success ? "Image received" : "Image fetch failed",
-               success ? "Endpoint OK" : "Check server");
+               success
+                   ? (receivedImageName.length() > 0 ? receivedImageName : "Endpoint OK")
+                   : "Check server");
     return success;
   }
 
