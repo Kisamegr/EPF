@@ -651,7 +651,9 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
      * beyond the 65535 default. SETTINGS INITIAL_WINDOW_SIZE only sets per-stream
      * window; the connection-level window starts at 65535 and must be explicitly
      * expanded with WINDOW_UPDATE on stream 0. */
-    uint32_t conn_window_delta = ML_H2_BUFFER_SIZE - 65535;
+    uint32_t conn_window_delta = ML_H2_BUFFER_SIZE > 65535
+                               ? ML_H2_BUFFER_SIZE - 65535
+                               : 0;
     if (conn_window_delta > 0) {
         int wu_len = ml_h2_build_window_update(h2_init + pos, sizeof(h2_init) - pos,
                                                 0, conn_window_delta);
@@ -1392,12 +1394,25 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      * This is critical because a single H2 frame can span multiple Noise frames
      * (v1 does the same with h2_buffer).
      * Smart timeout: extend to 60s for large tailnets (300+ peers = 240KB+). */
-    uint8_t *h2_recv = ml_psram_malloc(ML_H2_BUFFER_SIZE);  /* 512KB for 300+ peer tailnets */
-    if (!h2_recv) return -1;
+    uint8_t *h2_recv = ml_psram_malloc(ML_H2_BUFFER_SIZE);
+    if (!h2_recv) {
+        ESP_LOGE(TAG, "MapResponse H2 buffer allocation failed (%d KB): free=%u largest=%u",
+                 (int)(ML_H2_BUFFER_SIZE / 1024),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        return -1;
+    }
     size_t h2_total = 0;
 
     uint8_t *resp_buf = ml_psram_malloc(ML_JSON_BUFFER_SIZE);
-    if (!resp_buf) { free(h2_recv); return -1; }
+    if (!resp_buf) {
+        ESP_LOGE(TAG, "MapResponse JSON buffer allocation failed (%d KB): free=%u largest=%u",
+                 (int)(ML_JSON_BUFFER_SIZE / 1024),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        free(h2_recv);
+        return -1;
+    }
     size_t json_total = 0;
 
     /* Set extended recv timeout for large MapResponse (60 seconds) */
@@ -1414,11 +1429,19 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
      * (60s) before proceeding, which dominates connection time on cellular. */
     bool got_end_stream = false;
     for (int read_count = 0; read_count < 200; read_count++) {
-        uint8_t *frame_buf = ml_psram_malloc(65536);
-        if (!frame_buf) break;
+        uint8_t *frame_buf = ml_psram_malloc(ML_COORD_FRAME_BUFFER_SIZE);
+        if (!frame_buf) {
+            ESP_LOGE(TAG, "MapResponse frame buffer allocation failed (%d KB): free=%u largest=%u",
+                     (int)(ML_COORD_FRAME_BUFFER_SIZE / 1024),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            break;
+        }
 
-        int frame_len = noise_recv(ml, noise, frame_buf, 65536);
+        int frame_len = noise_recv(ml, noise, frame_buf, ML_COORD_FRAME_BUFFER_SIZE);
         if (frame_len <= 0) {
+            ESP_LOGW(TAG, "MapResponse receive ended: frame_len=%d errno=%d",
+                     frame_len, errno);
             free(frame_buf);
             break;
         }
@@ -2001,10 +2024,10 @@ static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
     struct timeval tv_recv = { .tv_sec = 2, .tv_usec = 0 };
     ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
 
-    uint8_t *frame_buf = ml_psram_malloc(65536);
+    uint8_t *frame_buf = ml_psram_malloc(ML_COORD_FRAME_BUFFER_SIZE);
     if (!frame_buf) return 0;
 
-    int frame_len = noise_recv(ml, noise, frame_buf, 65536);
+    int frame_len = noise_recv(ml, noise, frame_buf, ML_COORD_FRAME_BUFFER_SIZE);
 
     if (frame_len <= 0) {
         free(frame_buf);

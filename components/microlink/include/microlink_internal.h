@@ -109,9 +109,19 @@ extern "C" {
 #define ML_CTRL_BACKOFF_MAX_MS          30000
 #define ML_CTRL_KEEPALIVE_MS            60000
 
-/* Large tailnet buffer sizes (PSRAM-allocated, configurable via menuconfig) */
-#define ML_H2_BUFFER_SIZE       (CONFIG_ML_H2_BUFFER_SIZE_KB * 1024)
-#define ML_JSON_BUFFER_SIZE     (CONFIG_ML_JSON_BUFFER_SIZE_KB * 1024)
+/* Control-plane buffers. The ESP32 prototype has no PSRAM, so clamp its
+ * working set even if the shared defaults were generated for the S3 target.
+ * The prototype is intended for small tailnets; the PSRAM target keeps the
+ * configurable larger values for the full MapResponse. */
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
+#define ML_H2_BUFFER_SIZE          (CONFIG_ML_H2_BUFFER_SIZE_KB * 1024)
+#define ML_JSON_BUFFER_SIZE        (CONFIG_ML_JSON_BUFFER_SIZE_KB * 1024)
+#define ML_COORD_FRAME_BUFFER_SIZE 65536
+#else
+#define ML_H2_BUFFER_SIZE          (32 * 1024)
+#define ML_JSON_BUFFER_SIZE        (32 * 1024)
+#define ML_COORD_FRAME_BUFFER_SIZE (16 * 1024)
+#endif
 
 /* Noise protocol */
 #define ML_NOISE_KEY_LEN        32
