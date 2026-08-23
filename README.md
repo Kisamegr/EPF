@@ -30,11 +30,11 @@ EPF Flask server
    v
 ESP32 firmware
    |
-   +-- ee04_epaper: Wi-Fi -> MicroLink/Tailscale -> private EPF server
+   +-- ee04_epaper_tailscale: Wi-Fi -> MicroLink/Tailscale -> private EPF server
    |
    +-- prototype_oled: consume the complete payload and show the photo name
    |
-   +-- ee04_epaper: send the payload to the Spectra 6 panel
+   +-- ee04_epaper / ee04_epaper_tailscale: send the payload to the Spectra 6 panel
    |
    +-- GET /sleep, then deep-sleep on the e-paper profile
 ```
@@ -152,8 +152,8 @@ as its source directory.
 | --- | --- | --- |
 | `prototype_oled` | ESP-WROOM-32 + 128x32 SSD1306 OLED | Default local profile; performs the server exchange and shows status/photo name on OLED |
 | `prototype_oled_tailscale` | ESP-WROOM-32 + 128x32 SSD1306 OLED | Experimental 4 MB Tailscale test profile |
-| `ee04_epaper_local` | Seeed XIAO ePaper Display Board EE04 + 7.3-inch Spectra 6 | Local profile; no Tailscale client is compiled or started |
-| `ee04_epaper` | Seeed XIAO ePaper Display Board EE04 + 7.3-inch Spectra 6 | Parents' profile; joins Tailscale through MicroLink and enables deep sleep |
+| `ee04_epaper` | Seeed XIAO ePaper Display Board EE04 + 7.3-inch Spectra 6 | Default local profile; no Tailscale client is compiled or started |
+| `ee04_epaper_tailscale` | Seeed XIAO ePaper Display Board EE04 + 7.3-inch Spectra 6 | Parents' profile; joins Tailscale through MicroLink and enables deep sleep |
 
 The default PlatformIO environment is `prototype_oled`.
 
@@ -200,10 +200,10 @@ optional HTTPS support.
 For a local XIAO frame:
 
 ```powershell
-pio run -e ee04_epaper_local -t upload
+pio run -e ee04_epaper -t upload
 ```
 
-For the parents' XIAO frame, use `ee04_epaper` and configure the auth key as
+For the parents' XIAO frame, use `ee04_epaper_tailscale` and configure the auth key as
 described below. The current 4 MB OLED board also has an experimental
 Tailscale-enabled environment:
 
@@ -237,7 +237,7 @@ It registers as a real device in your tailnet and provides a WireGuard-backed
 
    The Docker port must still be published as `15001:5000`, and the host
    firewall must allow TCP 15001 from the tailnet.
-5. Build and upload the `ee04_epaper` environment. After boot, the device
+5. Build and upload the `ee04_epaper_tailscale` environment. After boot, the device
    appears in the Tailscale admin dashboard as `epf-frame` and logs its assigned
    `100.x.x.x` address.
 
@@ -275,8 +275,8 @@ sleep; the e-paper profile does.
 For the physical target:
 
 ```powershell
-pio run -e ee04_epaper
-pio run -e ee04_epaper -t upload
+pio run -e ee04_epaper_tailscale
+pio run -e ee04_epaper_tailscale -t upload
 ```
 
 The EE04 display wiring is defined by the board profile. Verify the 50-pin
@@ -313,7 +313,7 @@ ESP32 flash before uploading.
 - Confirm `Arduino/tailscale_secrets.h` exists and contains a valid `tskey-auth-...` key.
 - Check the serial log for `Tailscale failed`; the most common causes are an
   expired/non-reusable key, missing internet access, or an unsupported board profile.
-- Use the `ee04_epaper` environment, not `prototype_oled`.
+- Use the `ee04_epaper_tailscale` environment, not `ee04_epaper` or `prototype_oled`.
 - The MicroLink client is a third-party Tailscale-compatible implementation;
   the XIAO ESP32-S3 with PSRAM is the intended hardware class.
 
