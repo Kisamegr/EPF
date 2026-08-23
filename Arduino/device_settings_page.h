@@ -11,7 +11,7 @@ static const char DEVICE_SETTINGS_PAGE[] PROGMEM = R"rawliteral(
 <title>EPF frame settings</title><style>
 body{font:16px system-ui,sans-serif;max-width:560px;margin:2rem auto;padding:0 1rem;color:#222}
 label{display:block;margin-top:1rem;font-weight:600}input,select,button{box-sizing:border-box;width:100%;padding:.65rem;margin-top:.3rem;font:inherit}
-button{margin-top:1.2rem;background:#146c94;color:#fff;border:0;border-radius:4px}.muted{color:#666;font-size:.9rem}
+button{margin-top:1.2rem;background:#146c94;color:#fff;border:0;border-radius:4px}.danger{background:#a22}.muted{color:#666;font-size:.9rem}
 fieldset{margin-top:1.5rem;padding:0 1rem 1rem;border:1px solid #ccc}legend{font-weight:700}
 #message{margin-top:1rem;white-space:pre-wrap}
 </style></head><body>
@@ -32,6 +32,10 @@ fieldset{margin-top:1.5rem;padding:0 1rem 1rem;border:1px solid #ccc}legend{font
 <label for="tailscaleName">Device name</label><input id="tailscaleName" value="epf-frame">
 <label for="tailscaleKey">Provisioning auth key</label><input id="tailscaleKey" type="password" autocomplete="off" placeholder="Leave blank to keep current">
 <p id="tailscaleNote" class="muted"></p></fieldset>
+<fieldset><legend>Device actions</legend>
+<p class="muted">Factory reset deletes saved Wi-Fi, server, portal-password, refresh-rate, and Tailscale settings, then restarts the frame.</p>
+<button id="factoryReset" class="danger">Factory reset</button>
+</fieldset>
 <button id="save">Save settings</button><button id="restart">Restart</button>
 <p id="message"></p><pre id="status" class="muted"></pre>
 <script>
@@ -41,6 +45,7 @@ async function scan(){try{const r=await fetch('/scan');if(r.status===202){setTim
 async function load(){try{const s=await (await fetch('/api/settings')).json();$('serverUrl').value=s.server_url||'';$('tailscaleEnabled').checked=!!s.tailscale_enabled;$('tailscaleName').value=s.tailscale_name||'epf-frame';$('tailscaleNote').textContent=s.tailscale_compiled?'':'Tailscale support is not included in this firmware.';if(s.wifi_ssid)$('ssid').value=s.wifi_ssid;const st=await (await fetch('/api/status')).json();isCaptive=!!st.captive;if(isCaptive)scan()}catch(e){}}
 $('save').onclick=async()=>{const setup=$('ssid').value;const body={server_url:$('serverUrl').value,tailscale_enabled:$('tailscaleEnabled').checked,tailscale_name:$('tailscaleName').value,wifi_ssid:setup,wifi_password:$('wifiPassword').value,admin_password:$('adminPassword').value,tailscale_auth_key:$('tailscaleKey').value};try{let r;if(isCaptive&&setup){r=await fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:setup,pswd:$('wifiPassword').value,server:$('serverUrl').value,...body})})}else{r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(body)})}msg(await r.text());if(r.ok&&setup) setTimeout(()=>location.reload(),1500)}catch(e){msg('Save failed: '+e)}};
 $('restart').onclick=async()=>{try{const r=await fetch('/api/restart',{method:'POST',headers:authHeaders()});msg(await r.text())}catch(e){msg('Restart failed: '+e)}};
+$('factoryReset').onclick=async()=>{if(!confirm('Factory reset this frame? This deletes all saved Wi-Fi, server, portal-password, refresh-rate, and Tailscale settings.'))return;try{const r=await fetch('/api/factory-reset',{method:'POST',headers:authHeaders()});msg(await r.text());if(r.ok)setTimeout(()=>location.href='/',3000)}catch(e){msg('Factory reset failed: '+e)}};
 load();setInterval(async()=>{try{$('status').textContent=JSON.stringify(await (await fetch('/api/status')).json(),null,2)}catch(e){}},5000);
 </script></body></html>
 )rawliteral";
