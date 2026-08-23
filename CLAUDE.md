@@ -4,17 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An e-paper photo frame split across two codebases that talk over HTTP:
+An Immich-backed photo frame split across a Docker server and ESP32 firmware
+that talk over HTTP:
 
 - **Server** (`app.py`, `epf/`, `cpy.pyx`, `templates/`, `static/`) — a Flask app, normally run in Docker on a NAS. Pulls photos from an [Immich](https://immich.app) album, crops/enhances/dithers them to the panel's 6-color palette, and serves the result already packed for the display.
-- **Firmware** (`Arduino/`) — an ESP32-C6 sketch (`epd7in3e.ino`) for a Waveshare 7.3" Spectra 6 (E6) panel, 800x480. It does no image processing: it streams bytes straight into the panel and goes back into deep sleep.
+- **Firmware** (`Arduino/`) — one sketch with two compile-time hardware profiles. `prototype_oled` runs on an ESP-WROOM-32 with a 128x32 SSD1306 OLED and exercises the real server exchange while emulating the final display step; `ee04_epaper` targets the Seeed XIAO ESP32-S3 EE04 and the 7.3" Spectra 6 panel.
 - **CAD** (`CAD/*.STEP`) — enclosure parts, not built by any toolchain here.
 
-There are no tests, no linter config, and no build system for the Python side.
+PlatformIO is configured in `platformio.ini` with `Arduino/` as `src_dir`; its
+default environment is `prototype_oled`. There are no automated tests or
+Python linter configuration.
 
 ## Server: build and run
 
-`docker compose up -d`, with a `.env` alongside holding `IMMICH_API_KEY`. Or directly: `python app.py` (serves on `0.0.0.0:5000`).
+`docker compose up -d`, with a `.env` alongside holding `IMMICH_API_KEY`. The
+published image maps host port `15001` to Flask port `5000`; a local image can
+be built with `docker build -t epf:local .` and selected in Compose. Directly,
+`python app.py` serves on `0.0.0.0:5000`, but Windows cannot import the
+committed Linux `cpy.so` outside a Linux environment.
 
 `docker-compose.yml` exists because two things are easy to get wrong and both fail silently:
 
@@ -47,7 +54,7 @@ The front end is split the same way: `templates/settings.html` is markup only, w
 
 This contract is the thing to be careful about — both sides must change together.
 
-- `GET /download` — the device sends its battery voltage in a `batteryCap` **request header** (millivolts). Response is `text/plain`: ASCII hex bytes as `"XX,XX,..."` terminated by `};`, i.e. C-array source text, not binary. The `X-Photo-Url` response header carries the Immich web URL of the chosen photo (intended for writing an NFC tag; the firmware does not read it yet).
+- `GET /download` — the device sends its battery voltage in a `batteryCap` **request header** (millivolts; the OLED profile sends `0`). Response is `text/plain`: ASCII hex bytes as `"XX,XX,..."` terminated by `};`, i.e. C-array source text, not binary. `X-Photo-Url` carries the Immich web URL of the chosen photo (intended for writing an NFC tag; the firmware does not read it yet), and `X-Photo-Name` carries the selected asset's original filename for the OLED emulator.
 - `GET /sleep` — returns `{current_time, next_wakeup, sleep_duration}` where `sleep_duration` is **milliseconds**. The firmware divides by 1000 and passes it to `esp_deep_sleep`. Falls back to 24h if absent. `/download` and `/sleep` are two separate requests per wake cycle.
 - `GET /setting` (GET renders, POST saves) — the config UI; `/` redirects here. Battery percentage shown here comes from the last `/download` request's header, cached in module globals for one hour, so it reads 0% until the device has checked in.
 - `GET /log?limit=N` — the system-log card, newest first (limit clamped to 500). Events are appended as JSONL to `events.jsonl` beside `tracking.txt`, so the mount that keeps the settings keeps the history; `log_event()` never raises and is guarded by a lock, because the threaded dev server means the device and a browser can write at once. The file is trimmed to `LOG_MAX_ENTRIES` once it passes `LOG_TRIM_BYTES`. Events: `checkin` (ip, battery, asset, album, plus `mac`/`rssi` **only if the firmware sends `X-Device-Mac`/`X-Device-Rssi`** — HTTP carries no MAC and the container cannot read the LAN's ARP table), `settings_saved` (with a before/after diff), `config_reloaded`, `tracking_reset`, `notified`, `notify_bound`, `notify_unbound`, `log_cleared`, `error`, `startup`. `/sleep` deliberately writes nothing: it fires every wake-up and its answer is implied by the check-in. `POST /log/clear` empties the file.
@@ -75,21 +82,46 @@ Three palettes must stay consistent: the pure-RGB one inside `cpy.pyx:convert_im
 
 ## Firmware: build and flow
 
-Arduino IDE, board FireBeetle 2 ESP32-C6. The folder must be renamed to `epd7in3e` to match the `.ino`. Libraries: ArduinoJson, AsyncTCP, ESPAsyncWebServer. Pin map is in the comment block at the top of `epd7in3e.ino`.
+PlatformIO uses `Arduino/` as the source directory. The environments are:
+
+- `prototype_oled` — ESP-WROOM-32, 128x32 SSD1306 OLED; default environment
+- `ee04_epaper` — Seeed XIAO ESP32-S3 EE04 and Spectra 6 e-paper target
+
+Build with `pio run -e prototype_oled` or `pio run -e ee04_epaper`; upload with
+the same environment plus `-t upload`. Arduino IDE can still compile the
+sketch, but must select the matching `EPF_HARDWARE_PROFILE` build flag.
 
 `setup()` runs once per wake and never returns to `loop()`:
 
-1. Read battery on ADC pin 0 (×2 for the divider). Below 3050 mV: clear the screen and sleep 24h.
-2. `epd.Init()`, mount SPIFFS, open the `data` Preferences namespace.
-3. `Button(CONFIG_PIN).result()` — blocks ~3.5s watching GPIO 2. A ~3s hold enters the captive portal; a short press just proceeds (that's the wake-and-refresh path).
-4. Connect via `WifiCaptivePortal` (up to 5 saved SSIDs, AP `ESP32_ePAPER` at `http://4.3.2.1`), or start the portal if nothing is saved.
-5. `downloadImage()`: read `SERVER_BASE_URL` from Preferences, GET `/download`, stream-parse the hex text and `epd.SendData()` each byte after `SendCommand(0x10)`, then `TurnOnDisplay()`; GET `/sleep`; `hibernate()`.
+1. The e-paper profile checks battery voltage; the OLED profile skips battery
+   measurement.
+2. Initialize the selected display backend. The OLED profile must initialize
+   successfully before networking starts.
+3. Connect through `WifiCaptivePortal` using up to five saved SSIDs.
+4. `downloadImage()` reads `SERVER_BASE_URL`, performs `GET /download`, and
+   streams/parses the ASCII hex panel payload. The request includes a
+   `batteryCap` header; OLED sends `0`.
+5. With `EPF_USE_EPAPER`, parsed bytes go to `epd.SendData()` after
+   `SendCommand(0x10)`, then `TurnOnDisplay()` and `epd.Sleep()` run. With
+   `EPF_USE_OLED`, those e-paper calls compile out; the complete payload is
+   still consumed and the `X-Photo-Name` response header is shown on the OLED.
+6. After a successful download, the firmware requests `/sleep`. The e-paper
+   profile uses the returned duration for deep sleep; the OLED profile leaves
+   the device awake so the result remains visible.
 
-State lives in two Preferences namespaces: `data` (`SERVER_BASE_URL`, retry counters) and `wificaptive` (SSIDs/passwords, last-used index). `WifiCaptive.cpp` writes `SERVER_BASE_URL` on portal save; the `SERVER_BASE_URL` `#define` in `config.h` is a leftover and is not the value used at runtime.
+Server URL state lives in the `data` Preferences namespace. The captive portal
+writes `SERVER_BASE_URL` there, and a saved value overrides the
+`SERVER_BASE_URL` fallback in `Arduino/config.h`. An empty saved value falls
+back to the compile-time value. `downloadImage()` prints the actual URL as
+`nas url: ...`, which is the first networking diagnostic to check.
 
-Deep sleep wakes on the timer or on GPIO 2 going low (`ext1`). `epd.Sleep()` before hibernating matters for the ~16µA target — dropping it leaves the panel drawing current.
+The OLED prototype has no physical configuration button
+(`EPF_HAS_CONFIG_BUTTON=0`); the EE04 profile uses GPIO 2 for the setup/wake
+button. The OLED profile also disables deep sleep so the status remains on the
+screen. The e-paper profile wakes on the timer or GPIO 2 (`ext1`), and
+`epd.Sleep()` before hibernation is required for the low-power target.
 
-`WifiCaptive*` files are adapted from [TRMNL firmware](https://github.com/usetrmnl/firmware/tree/main/lib/wificaptive); `epd7in3e.*` and `epdif.*` are Waveshare vendor drivers. Prefer keeping local edits minimal and obvious in all of these.
+`WifiCaptive*` files are adapted from [TRMNL firmware](https://github.com/usetrmnl/firmware/tree/main/lib/wificaptive); `epd7in3e.*` and `epdif.*` are Waveshare vendor drivers. Keep profile-specific behavior behind the existing `EPF_USE_OLED`/`EPF_USE_EPAPER` compile-time guards.
 
 ## Conventions
 
