@@ -7,11 +7,11 @@
 #include <esp_wifi.h>          //Used for mpdu_rx_disable android workaround
 #include <AsyncJson.h>
 #include "Preferences.h"
-#include "WifiCaptivePage.h"
 #include <ArduinoJson.h>
+#include "DeviceSettingsServer.h"
 
 #define WIFI_SSID "ESP32_ePAPER"
-#define WIFI_PASSWORD NULL
+#define WIFI_PASSWORD "epf-setup"
 
 // Define the DNS interval in milliseconds between processing DNS requests
 #define DNS_INTERVAL 60
@@ -51,6 +51,7 @@ private:
 
     DNSServer *_dnsServer;
     AsyncWebServer *_server;
+    DeviceSettingsServer *_settingsServer = nullptr;
     String _ssid = "";
     String _password = "";
     String _api_server = "";
@@ -92,6 +93,9 @@ public:
     /// @brief Connects to the saved SSID with the best signal strength
     /// @return True if successfully connected to saved SSID, false otherwise.
     bool autoConnect();
+
+    /// @brief Saves a network using the same NVS layout as the captive portal.
+    void saveRemoteWifiCredentials(const String &ssid, const String &pass);
 };
 
 extern WifiCaptive WifiCaptivePortal;

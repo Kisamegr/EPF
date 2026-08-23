@@ -41,13 +41,6 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
     server.on("/favicon.ico", [](AsyncWebServerRequest *request)
               { request->send(404); }); // webpage icon
 
-    // Serve index.html
-    server.on("/", HTTP_ANY, [&](AsyncWebServerRequest *request)
-              {
-		AsyncWebServerResponse *response = request->beginResponse(200, "text/html", INDEX_HTML, INDEX_HTML_LEN);
-		response->addHeader("Content-Encoding", "gzip");
-    	request->send(response); });
-
     // Servce logo.svg
     // server.on("/logo.svg", HTTP_ANY, [&](AsyncWebServerRequest *request)
     //           {
@@ -119,8 +112,41 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
                                                                            {
 		JsonObject data = json.as<JsonObject>();
 		String ssid = data["ssid"];
-		String pswd = data["pswd"];
+        String pswd = data["pswd"];
         String api_server = data["server"];
+
+        if (api_server.length() > 0 && !DeviceSettingsServer::isValidServerUrl(api_server))
+        {
+            request->send(400, "application/json", "{\"error\":\"invalid server URL\"}");
+            return;
+        }
+
+        // The setup page can provision the settings-server credentials and
+        // Tailscale parameters in the same transaction as Wi-Fi.
+        Preferences settings;
+        settings.begin("data", false);
+        String admin_password = data["admin_password"] | "";
+        if (admin_password.length() > 0 && admin_password != "********")
+            settings.putString(PREFERENCES_ADMIN_PASSWORD, admin_password);
+        if (data.containsKey("tailscale_enabled"))
+        {
+            bool enabled = data["tailscale_enabled"] | false;
+            if (enabled && !EPF_ENABLE_TAILSCALE)
+            {
+                settings.end();
+                request->send(400, "application/json", "{\"error\":\"Tailscale support is not included in this firmware\"}");
+                return;
+            }
+            settings.putBool(PREFERENCES_TAILSCALE_ENABLED, enabled);
+        }
+        String tailscale_name = data["tailscale_name"] | "";
+        if (tailscale_name.length() > 0)
+            settings.putString(PREFERENCES_TAILSCALE_NAME, tailscale_name);
+        String tailscale_key = data["tailscale_auth_key"] | "";
+        if (tailscale_key.length() > 0 && tailscale_key != "********")
+            settings.putString(PREFERENCES_TAILSCALE_AUTH_KEY, tailscale_key);
+        settings.end();
+
 		_ssid = ssid;
 		_password = pswd;
         _api_server = api_server;
@@ -137,7 +163,16 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
 bool WifiCaptive::startPortal()
 {
     _dnsServer = new DNSServer();
-    _server = new AsyncWebServer(80);
+    _settingsServer = new DeviceSettingsServer();
+    if (!_settingsServer->begin(true))
+    {
+        delete _settingsServer;
+        _settingsServer = nullptr;
+        delete _dnsServer;
+        _dnsServer = nullptr;
+        return false;
+    }
+    _server = _settingsServer->server();
 
     // Set the WiFi mode to access point and station
     WiFi.mode(WIFI_MODE_AP);
@@ -173,7 +208,7 @@ bool WifiCaptive::startPortal()
     setUpWebserver(*_server, localIP);
 
     // begin serving
-    _server->begin();
+    _settingsServer->start();
 
     // start async network scan
     WiFi.scanNetworks(true);
@@ -243,9 +278,10 @@ bool WifiCaptive::startPortal()
     _dnsServer = nullptr;
 
     // stop server
-    _server->end();
-    delete _server;
     _server = nullptr;
+    _settingsServer->end();
+    delete _settingsServer;
+    _settingsServer = nullptr;
 
     return succesfullyConnected;
 }
@@ -265,6 +301,11 @@ void WifiCaptive::resetSettings()
 
     preferences.begin("data", false);
     preferences.remove("SERVER_BASE_URL");
+    preferences.remove(PREFERENCES_ADMIN_PASSWORD);
+    preferences.remove(PREFERENCES_TAILSCALE_ENABLED);
+    preferences.remove(PREFERENCES_TAILSCALE_NAME);
+    preferences.remove(PREFERENCES_TAILSCALE_AUTH_KEY);
+    preferences.remove(PREFERENCES_REFRESH_RATE);
     preferences.end();
 
     for (int i = 0; i < WIFI_MAX_SAVED_CREDS; i++)
@@ -350,14 +391,16 @@ void WifiCaptive::readWifiCredentials()
 
 void WifiCaptive::saveWifiCredentials(String ssid, String pass, String url)
 {
-    // Log.info("Saving wifi credentials: %s\r\n", ssid.c_str());
-    Serial.println(url);
-
     // Check if the credentials already exist
     for (u16_t i = 0; i < WIFI_MAX_SAVED_CREDS; i++)
     {
         if (_savedWifis[i].ssid == ssid && _savedWifis[i].pswd == pass)
         {
+            Preferences preferences;
+            preferences.begin("data", false);
+            if (url.length() > 0)
+                preferences.putString("SERVER_BASE_URL", url);
+            preferences.end();
             return; // Avoid saving duplicate networks
         }
     }
@@ -380,8 +423,14 @@ void WifiCaptive::saveWifiCredentials(String ssid, String pass, String url)
     preferences.end();
 
     preferences.begin("data", false);
-    preferences.putString("SERVER_BASE_URL", url);
+    if (url.length() > 0)
+        preferences.putString("SERVER_BASE_URL", url);
     preferences.end();
+}
+
+void WifiCaptive::saveRemoteWifiCredentials(const String &ssid, const String &pass)
+{
+    saveWifiCredentials(ssid, pass, "");
 }
 
 void WifiCaptive::saveLastUsedWifiIndex(int index)

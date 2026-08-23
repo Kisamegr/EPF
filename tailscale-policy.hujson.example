@@ -1,0 +1,48 @@
+// Apply this policy in the tailnet admin console after replacing the
+// administrator group and the EPF server identity with your own values.
+{
+  "tagOwners": {
+    "tag:epf-frame": ["autogroup:admin"],
+    "tag:epf-server": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:epf-frame"],
+      "dst": ["tag:epf-server"],
+      "ip": ["tcp:15001"]
+    },
+    {
+      "src": ["group:epf-admins"],
+      "dst": ["tag:epf-frame"],
+      "ip": ["tcp:80"]
+    }
+  ],
+  "tests": [
+    {
+      "src": "tag:epf-frame",
+      "proto": "tcp",
+      "accept": ["tag:epf-server:15001"],
+      "deny": [
+        "tag:epf-server:22",
+        "tag:epf-server:80",
+        "tag:epf-server:443",
+        "autogroup:internet:443"
+      ]
+    },
+    {
+      "src": "group:epf-admins",
+      "proto": "tcp",
+      "accept": ["tag:epf-frame:80"],
+      "deny": ["tag:epf-frame:22"]
+    },
+    {
+      // Replace with a real non-admin test identity in the tailnet.
+      "src": "epf-nonadmin@example.com",
+      "proto": "tcp",
+      "deny": ["tag:epf-frame:80", "tag:epf-frame:22"]
+    }
+  ]
+  // Do not add SSH, exit-node, subnet-route, Funnel, Serve, or broad
+  // internet grants for tag:epf-frame. Keep the frame on an isolated IoT
+  // network and use a short-lived, non-reusable tagged auth key.
+}

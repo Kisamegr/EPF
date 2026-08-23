@@ -53,6 +53,14 @@
 
 #define SERVER_BASE_URL "http://192.168.1.134:15001"
 
+// Runtime settings stored in the existing "data" NVS namespace.
+#define PREFERENCES_ADMIN_PASSWORD "admin_password"
+#define PREFERENCES_TAILSCALE_ENABLED "tailscale_enabled"
+#define PREFERENCES_TAILSCALE_NAME "tailscale_name"
+#define PREFERENCES_TAILSCALE_AUTH_KEY "tailscale_auth"
+#define PREFERENCES_REFRESH_RATE "refresh_rate"
+#define EPF_FIRMWARE_VERSION "0.1.0"
+
 #ifndef TAILSCALE_AUTH_KEY
 #define TAILSCALE_AUTH_KEY ""
 #endif

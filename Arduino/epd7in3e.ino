@@ -19,6 +19,7 @@
 #include "button.h"
 #include <Preferences.h>
 #include <WifiCaptive.h>
+#include <DeviceSettingsServer.h>
 #include <filesystem.h>
 #if EPF_USE_OLED
 #include "oled_status.h"
@@ -58,8 +59,11 @@ private:
 #endif
   String imageUrl = "";
   String receivedImageName = "";
+  String tailscaleAuthKey = "";
+  String tailscaleDeviceName = "";
   int requestedSleepSeconds = 0;
   bool tailnetReady = false;
+  bool tailscaleEnabled = false;
 
   void showStatus(const String &line1, const String &line2 = String())
   {
@@ -169,6 +173,7 @@ private:
 
     // Download and process image
     bool success = false;
+    int lastHttpCode = 0;
     requestedSleepSeconds = 0;
     bool retryOnError = true; // Add retry flag
 
@@ -179,6 +184,7 @@ private:
       for (uint8_t i = 0; i < MAX_RETRIES; i++)
       {
         int httpCode = http.GET();
+        lastHttpCode = httpCode;
 
         if (httpCode == HTTP_CODE_OK)
         {
@@ -272,13 +278,33 @@ private:
                success
                    ? (receivedImageName.length() > 0 ? receivedImageName : "Endpoint OK")
                    : "Check server");
+    EpfSettingsServer.setLastImageResult(success, lastHttpCode);
     return success;
   }
 
 #if EPF_ENABLE_TAILSCALE
   bool connectTailnet()
   {
-    if (strlen(TAILSCALE_AUTH_KEY) == 0)
+    Preferences settings;
+    settings.begin("data", true);
+    tailscaleEnabled = settings.getBool(PREFERENCES_TAILSCALE_ENABLED, EPF_DEFAULT_TAILSCALE);
+    tailscaleAuthKey = settings.getString(PREFERENCES_TAILSCALE_AUTH_KEY, "");
+    tailscaleDeviceName = settings.getString(PREFERENCES_TAILSCALE_NAME, TAILSCALE_DEVICE_NAME);
+    settings.end();
+
+    if (!tailscaleEnabled)
+    {
+      EpfSettingsServer.setTailscaleStatus(false, "");
+      showStatus("Tailscale disabled", "WiFi only");
+      return true;
+    }
+
+    // Keep compatibility with existing prototype builds that used the
+    // compile-time secret, while making the persisted setting the normal path.
+    if (tailscaleAuthKey.length() == 0)
+      tailscaleAuthKey = TAILSCALE_AUTH_KEY;
+
+    if (tailscaleAuthKey.length() == 0)
     {
       showStatus("Tailscale key", "Add secrets file");
       Serial.println(F("Tailscale is not configured. Add Arduino/tailscale_secrets.h."));
@@ -286,19 +312,20 @@ private:
     }
 
     microlink_config_t config = {};
-    config.auth_key = TAILSCALE_AUTH_KEY;
-    config.device_name = TAILSCALE_DEVICE_NAME;
+    config.auth_key = tailscaleAuthKey.c_str();
+    config.device_name = tailscaleDeviceName.c_str();
     config.enable_derp = true;
     config.enable_stun = true;
     config.enable_disco = true;
     config.max_peers = 8;
     config.wifi_tx_power_dbm = 0;
 
-    showStatus("Connecting Tailscale", TAILSCALE_DEVICE_NAME);
+    showStatus("Connecting Tailscale", tailscaleDeviceName);
     tailnet = microlink_init(&config);
     if (!tailnet)
     {
       showStatus("Tailscale failed", "Init error");
+      EpfSettingsServer.setTailscaleStatus(false, "");
       return false;
     }
 
@@ -308,6 +335,7 @@ private:
       showStatus("Tailscale failed", "Start error");
       microlink_destroy(tailnet);
       tailnet = nullptr;
+      EpfSettingsServer.setTailscaleStatus(false, "");
       return false;
     }
 
@@ -324,16 +352,33 @@ private:
       microlink_stop(tailnet);
       microlink_destroy(tailnet);
       tailnet = nullptr;
+      EpfSettingsServer.setTailscaleStatus(false, "");
       return false;
     }
 
     char vpnIp[16] = {};
     microlink_ip_to_str(microlink_get_vpn_ip(tailnet), vpnIp);
     tailnetReady = true;
+    EpfSettingsServer.setTailscaleStatus(true, String(vpnIp));
     showStatus("Tailscale ready", vpnIp);
     return true;
   }
 #endif
+
+  bool startSettingsServer()
+  {
+    EpfSettingsServer.setRestartCallback([]() { ESP.restart(); });
+    EpfSettingsServer.setFactoryResetCallback(resetDeviceCredentials);
+    if (!EpfSettingsServer.begin(false))
+    {
+      Serial.println(F("Settings server failed to allocate"));
+      return false;
+    }
+    EpfSettingsServer.start();
+    Serial.print(F("Settings page: http://"));
+    Serial.println(WiFi.localIP());
+    return true;
+  }
 
   // check if https
   bool startsWith(const String &str, const char *prefix)
@@ -451,10 +496,12 @@ private:
       tailnetReady = false;
     }
 #endif
+    EpfSettingsServer.end();
 
     // Use provided sleep duration or get default from WiFi manager
     // int sleep_interval = sleepDuration > 0 ? sleepDuration : wifiManager.getServerSleepDuration();
-    int sleep_interval = sleepDuration > 0 ? sleepDuration : 86400;
+    int sleep_interval = sleepDuration > 0 ? sleepDuration :
+        static_cast<int>(preferences.getUInt(PREFERENCES_REFRESH_RATE, SLEEP_INTERVAL));
 
     // Disconnect WiFi and turn off radio
     WiFi.disconnect(true);
@@ -575,6 +622,7 @@ public:
 #if EPF_ENABLE_TAILSCALE
         connectTailnet();
 #endif
+        startSettingsServer();
         return true;
       }
       // else {
@@ -596,6 +644,7 @@ public:
 #if EPF_ENABLE_TAILSCALE
         connectTailnet();
 #endif
+        startSettingsServer();
         return true;
       }
       // else {
@@ -614,6 +663,7 @@ public:
 #if EPF_ENABLE_TAILSCALE
         connectTailnet();
 #endif
+        startSettingsServer();
         return true;
       }
       //   if (!res) {
@@ -631,7 +681,7 @@ public:
 
     if (WiFi.status() == WL_CONNECTED
 #if EPF_ENABLE_TAILSCALE
-        && tailnetReady
+        && (!tailscaleEnabled || tailnetReady)
 #endif
     )
     {
