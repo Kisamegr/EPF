@@ -4,3 +4,9 @@
 photos/events.jsonl
 photos/tracking.txt
 config/config.yaml
+Arduino/tailscale_secrets.h
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+pio-build.log
+pio-test-*.log

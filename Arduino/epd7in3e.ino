@@ -2,13 +2,18 @@
 #include <SPI.h>
 #include <HTTPClient.h>
 #include "hardware_profile.h"
+#if EPF_ENABLE_TAILSCALE
+#include <microlink.h>
+#endif
 #if EPF_USE_EPAPER
 #include "epd7in3e.h"
 #endif
 #include "FS.h"
 #include <ArduinoJson.h>
 // #include "SimpleWiFiManager.h"
+#if EPF_ENABLE_SECURE_HTTP
 #include <WiFiClientSecure.h>
+#endif
 #include "driver/rtc_io.h"
 #include "config.h"
 #include "button.h"
@@ -20,6 +25,26 @@
 #endif
 
 Preferences preferences;
+
+#if EPF_ENABLE_TAILSCALE
+static microlink_t *tailnet = nullptr;
+
+static void onTailscaleState(microlink_t *handle, microlink_state_t state, void *)
+{
+  const char *names[] = {
+      "idle", "waiting for WiFi", "connecting", "registering",
+      "connected", "reconnecting", "error"};
+  const char *name = state < (sizeof(names) / sizeof(names[0])) ? names[state] : "unknown";
+  Serial.printf("[tailscale] state: %s\n", name);
+
+  if (state == ML_STATE_CONNECTED)
+  {
+    char ip[16] = {};
+    microlink_ip_to_str(microlink_get_vpn_ip(handle), ip);
+    Serial.printf("[tailscale] VPN address: %s\n", ip);
+  }
+}
+#endif
 
 class EpaperManager
 {
@@ -34,6 +59,7 @@ private:
   String imageUrl = "";
   String receivedImageName = "";
   int requestedSleepSeconds = 0;
+  bool tailnetReady = false;
 
   void showStatus(const String &line1, const String &line2 = String())
   {
@@ -70,8 +96,23 @@ private:
     Serial.print("nas url: ");
     Serial.println(imageUrl);
     bool isHttps = imageUrl.startsWith("https://");
+#if !EPF_ENABLE_SECURE_HTTP
+    if (isHttps)
+    {
+#if EPF_ENABLE_TAILSCALE
+      showStatus("Use Tailscale HTTP", "Tunnel is encrypted");
+      Serial.println(F("Use an http://100.x.x.x:15001 server URL for the Tailscale path."));
+#else
+      showStatus("Use HTTP URL", "HTTPS unavailable");
+      Serial.println(F("Use an http:// server URL for the ESP-IDF local profile."));
+#endif
+      return false;
+    }
+#endif
     WiFiClient *basicClient = nullptr;
+#if EPF_ENABLE_SECURE_HTTP
     WiFiClientSecure *secureClient = nullptr;
+#endif
     HTTPClient http;
     HTTPClient sleepHttp; // New HTTP client for sleep request
     http.setTimeout(HTTP_TIMEOUT);
@@ -89,6 +130,7 @@ private:
     // Setup client for image download
     if (isHttps)
     {
+#if EPF_ENABLE_SECURE_HTTP
       secureClient = new WiFiClientSecure;
       secureClient->setInsecure();
       if (!http.begin(*secureClient, imageUrl + downloadPath))
@@ -97,6 +139,7 @@ private:
         delete secureClient;
         return false;
       }
+#endif
     }
     else
     {
@@ -147,13 +190,17 @@ private:
           {
             // Setup new client for sleep request
             WiFiClient *sleepBasicClient = nullptr;
+#if EPF_ENABLE_SECURE_HTTP
             WiFiClientSecure *sleepSecureClient = nullptr;
+#endif
 
             if (isHttps)
             {
+#if EPF_ENABLE_SECURE_HTTP
               sleepSecureClient = new WiFiClientSecure;
               sleepSecureClient->setInsecure();
               sleepHttp.begin(*sleepSecureClient, sleepUrl);
+#endif
             }
             else
             {
@@ -181,8 +228,10 @@ private:
             }
 
             sleepHttp.end();
+#if EPF_ENABLE_SECURE_HTTP
             if (sleepSecureClient)
               delete sleepSecureClient;
+#endif
             if (sleepBasicClient)
               delete sleepBasicClient;
           }
@@ -212,8 +261,10 @@ private:
 
     http.end();
     delay(10);
+#if EPF_ENABLE_SECURE_HTTP
     if (secureClient)
       delete secureClient;
+#endif
     if (basicClient)
       delete basicClient;
 
@@ -223,6 +274,66 @@ private:
                    : "Check server");
     return success;
   }
+
+#if EPF_ENABLE_TAILSCALE
+  bool connectTailnet()
+  {
+    if (strlen(TAILSCALE_AUTH_KEY) == 0)
+    {
+      showStatus("Tailscale key", "Add secrets file");
+      Serial.println(F("Tailscale is not configured. Add Arduino/tailscale_secrets.h."));
+      return false;
+    }
+
+    microlink_config_t config = {};
+    config.auth_key = TAILSCALE_AUTH_KEY;
+    config.device_name = TAILSCALE_DEVICE_NAME;
+    config.enable_derp = true;
+    config.enable_stun = true;
+    config.enable_disco = true;
+    config.max_peers = 8;
+    config.wifi_tx_power_dbm = 0;
+
+    showStatus("Connecting Tailscale", TAILSCALE_DEVICE_NAME);
+    tailnet = microlink_init(&config);
+    if (!tailnet)
+    {
+      showStatus("Tailscale failed", "Init error");
+      return false;
+    }
+
+    microlink_set_state_callback(tailnet, onTailscaleState, nullptr);
+    if (microlink_start(tailnet) != ESP_OK)
+    {
+      showStatus("Tailscale failed", "Start error");
+      microlink_destroy(tailnet);
+      tailnet = nullptr;
+      return false;
+    }
+
+    const unsigned long deadline = millis() + TAILSCALE_CONNECT_TIMEOUT_MS;
+    while (!microlink_is_connected(tailnet) && millis() < deadline)
+    {
+      delay(250);
+    }
+
+    if (!microlink_is_connected(tailnet))
+    {
+      showStatus("Tailscale failed", "Check auth key");
+      Serial.println(F("Tailscale did not reach the connected state before timeout."));
+      microlink_stop(tailnet);
+      microlink_destroy(tailnet);
+      tailnet = nullptr;
+      return false;
+    }
+
+    char vpnIp[16] = {};
+    microlink_ip_to_str(microlink_get_vpn_ip(tailnet), vpnIp);
+    tailnetReady = true;
+    showStatus("Tailscale ready", vpnIp);
+    return true;
+  }
+#endif
 
   // check if https
   bool startsWith(const String &str, const char *prefix)
@@ -330,6 +441,16 @@ private:
   void hibernate(int sleepDuration = 0)
   {
     Serial.println("Preparing for deep sleep...");
+
+#if EPF_ENABLE_TAILSCALE
+    if (tailnet)
+    {
+      microlink_stop(tailnet);
+      microlink_destroy(tailnet);
+      tailnet = nullptr;
+      tailnetReady = false;
+    }
+#endif
 
     // Use provided sleep duration or get default from WiFi manager
     // int sleep_interval = sleepDuration > 0 ? sleepDuration : wifiManager.getServerSleepDuration();
@@ -451,6 +572,9 @@ public:
       if (res)
       {
         Serial.println(F("Config mode completed"));
+#if EPF_ENABLE_TAILSCALE
+        connectTailnet();
+#endif
         return true;
       }
       // else {
@@ -469,6 +593,9 @@ public:
       {
         showStatus("WiFi connected", WiFi.localIP().toString());
         preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+#if EPF_ENABLE_TAILSCALE
+        connectTailnet();
+#endif
         return true;
       }
       // else {
@@ -484,6 +611,9 @@ public:
       if (res)
       {
         preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+#if EPF_ENABLE_TAILSCALE
+        connectTailnet();
+#endif
         return true;
       }
       //   if (!res) {
@@ -499,7 +629,11 @@ public:
   {
     Serial.println(F("Update method called"));
 
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() == WL_CONNECTED
+#if EPF_ENABLE_TAILSCALE
+        && tailnetReady
+#endif
+    )
     {
       Serial.println(F("WiFi Connected. Downloading image"));
       if (downloadImage())
@@ -513,8 +647,13 @@ public:
     }
     else
     {
+#if EPF_ENABLE_TAILSCALE
+      showStatus("Tailscale offline", "Retry after reset");
+      Serial.println(F("Tailscale is not connected. Cannot download private image"));
+#else
       showStatus("WiFi offline", "Retry after reset");
       Serial.println(F("WiFi not connected. Cannot download image"));
+#endif
     }
 
     Serial.println(F("Update completed"));

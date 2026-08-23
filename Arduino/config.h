@@ -3,6 +3,15 @@
 
 #include "hardware_profile.h"
 
+// Keep the Tailscale auth key outside the repository. Copy
+// tailscale_secrets.h.example to tailscale_secrets.h and fill in the key
+// before flashing the EE04 profile.
+#if defined(__has_include)
+#if __has_include("tailscale_secrets.h")
+#include "tailscale_secrets.h"
+#endif
+#endif
+
 // File system configuration
 // #define CONFIG_FILE "/wifi_config.json"
 
@@ -43,6 +52,15 @@
 #define BUFFER_SIZE 131072U // Buffer size for image processing
 
 #define SERVER_BASE_URL "http://192.168.1.134:15001"
+
+#ifndef TAILSCALE_AUTH_KEY
+#define TAILSCALE_AUTH_KEY ""
+#endif
+#ifndef TAILSCALE_DEVICE_NAME
+#define TAILSCALE_DEVICE_NAME "epf-frame"
+#endif
+#define TAILSCALE_CONNECT_TIMEOUT_MS 120000U
+
 #define PREFERENCES_SLEEP_TIME_KEY "refresh_rate"
 #define PREFERENCES_LAST_SLEEP_TIME "last_sleep"
 #define PREFERENCES_CONNECT_API_RETRY_COUNT "retry_count"
