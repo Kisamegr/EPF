@@ -18,6 +18,8 @@
 #include "config.h"
 #include "button.h"
 #include <Preferences.h>
+#include <SPIFFS.h>
+#include "mbedtls/sha256.h"
 #include <WifiCaptive.h>
 #include <DeviceSettingsServer.h>
 #include <filesystem.h>
@@ -80,6 +82,74 @@ private:
     Serial.println();
   }
 
+#if EPF_USE_EPAPER
+  static int glyphIndex(char character)
+  {
+    if (character >= 'A' && character <= 'Z') return character - 'A';
+    if (character >= '2' && character <= '9') return 26 + character - '2';
+    if (character == '-') return 34;
+    if (character == ':') return 35;
+    return -1;
+  }
+
+  static uint8_t glyphRow(char character, uint8_t row)
+  {
+    // Five-by-seven glyphs for the intentionally small provisioning screen.
+    static const uint8_t glyphs[][7] = {
+      {14,17,17,31,17,17,17},{30,17,17,30,17,17,30},{15,16,16,16,16,16,15},
+      {30,17,17,17,17,17,30},{31,16,16,30,16,16,31},{31,16,16,30,16,16,16},
+      {15,16,16,23,17,17,15},{17,17,17,31,17,17,17},{31,4,4,4,4,4,31},
+      {7,2,2,2,2,18,12},{17,18,20,24,20,18,17},{16,16,16,16,16,16,31},
+      {17,27,21,21,17,17,17},{17,25,21,19,17,17,17},{14,17,17,17,17,17,14},
+      {30,17,17,30,16,16,16},{14,17,17,17,21,18,13},{30,17,17,30,20,18,17},
+      {15,16,16,14,1,1,30},{31,4,4,4,4,4,4},{17,17,17,17,17,17,14},
+      {17,17,17,17,17,10,4},{17,17,17,21,21,21,10},{17,17,10,4,10,17,17},
+      {17,17,10,4,4,4,4},{31,1,2,4,8,16,31},{14,17,19,21,25,17,14},
+      {4,12,4,4,4,4,14},{14,17,1,2,4,8,31},{30,1,1,14,1,1,30},
+      {2,6,10,18,31,2,2},{31,16,16,30,1,1,30},{14,16,16,30,17,17,14},
+      {31,1,2,4,8,8,8},{14,17,17,14,17,17,14},{14,17,17,15,1,1,14},
+      {0,0,0,31,0,0,0},{0,4,0,0,4,0,0}
+    };
+    int index = glyphIndex(character);
+    return index < 0 || row >= 7 ? 0 : glyphs[index][row];
+  }
+
+  static bool textPixel(const String &text, int originX, int originY, int scale, int x, int y)
+  {
+    if (y < originY || y >= originY + 7 * scale || x < originX) return false;
+    int character = (x - originX) / (6 * scale);
+    if (character < 0 || character >= static_cast<int>(text.length())) return false;
+    int column = ((x - originX) % (6 * scale)) / scale;
+    if (column >= 5) return false;
+    uint8_t row = (y - originY) / scale;
+    return (glyphRow(text[character], row) & (1 << (4 - column))) != 0;
+  }
+
+  void showProvisioningScreen()
+  {
+    const String password = WifiCaptive::provisioningPassword();
+    const String heading = "EPF SETUP";
+    const String ssid = "SSID: EPF-SETUP";
+    epd.SendCommand(0x10);
+    for (int y = 0; y < EPD_HEIGHT; ++y)
+    {
+      for (int x = 0; x < EPD_WIDTH; x += 2)
+      {
+        bool left = textPixel(heading, 180, 70, 12, x, y) || textPixel(ssid, 100, 220, 7, x, y) || textPixel(password, 40, 320, 6, x, y);
+        bool right = textPixel(heading, 180, 70, 12, x + 1, y) || textPixel(ssid, 100, 220, 7, x + 1, y) || textPixel(password, 40, 320, 6, x + 1, y);
+        epd.SendData((left ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE) << 4 | (right ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE));
+      }
+    }
+    epd.TurnOnDisplay();
+    Serial.printf("Provisioning SSID: %s; password: %s\n", WIFI_SSID, password.c_str());
+  }
+#else
+  void showProvisioningScreen()
+  {
+    showStatus("AP password", WifiCaptive::provisioningPassword());
+  }
+#endif
+
   bool downloadImage()
   {
     receivedImageName = "";
@@ -118,25 +188,25 @@ private:
     WiFiClientSecure *secureClient = nullptr;
 #endif
     HTTPClient http;
-    HTTPClient sleepHttp; // New HTTP client for sleep request
     http.setTimeout(HTTP_TIMEOUT);
 
-    // Parse base URL for sleep request
-    String baseUrl = imageUrl;
     const char *downloadPath = "/download";
-    const char *sleepPath = "/sleep";
 
-    const char *responseHeaders[] = {"X-Photo-Name"};
-    http.collectHeaders(responseHeaders, 1);
-
-    String sleepUrl = baseUrl + sleepPath;
+    const char *responseHeaders[] = {"X-Photo-Name", "X-EPF-Protocol", "X-Delivery-Id", "X-Payload-SHA256", "X-Sleep-Seconds"};
+    http.collectHeaders(responseHeaders, 5);
 
     // Setup client for image download
     if (isHttps)
     {
 #if EPF_ENABLE_SECURE_HTTP
       secureClient = new WiFiClientSecure;
-      secureClient->setInsecure();
+#ifdef EPF_HAS_SERVER_CA_CERT
+      secureClient->setCACert(EpfServerCaCert);
+#else
+      Serial.println(F("HTTPS certificate is not configured"));
+      delete secureClient;
+      return false;
+#endif
       if (!http.begin(*secureClient, imageUrl + downloadPath))
       {
         Serial.println("Failed to initialize HTTPS connection");
@@ -147,6 +217,10 @@ private:
     }
     else
     {
+#if !EPF_ENABLE_TAILSCALE
+      showStatus("HTTPS required", "or use Tailscale");
+      return false;
+#endif
       basicClient = new WiFiClient;
       if (!http.begin(*basicClient, imageUrl + downloadPath))
       {
@@ -170,19 +244,20 @@ private:
     batteryVoltage = (plusV / 10) * 2;
 #endif
     http.addHeader("batteryCap", String(batteryVoltage));
+    if (String(EPF_DEVICE_TOKEN).length() < 32)
+    {
+      showStatus("Device token missing", "Reflash securely");
+      return false;
+    }
+    http.addHeader("Authorization", String("Bearer ") + EPF_DEVICE_TOKEN);
 
     // Download and process image
     bool success = false;
     int lastHttpCode = 0;
     requestedSleepSeconds = 0;
-    bool retryOnError = true; // Add retry flag
-
-    while (retryOnError && !success)
-    {                       // Add retry loop
-      retryOnError = false; // Default to no retry
-
-      for (uint8_t i = 0; i < MAX_RETRIES; i++)
-      {
+    const unsigned long deadline = millis() + EPF_WAKE_DEADLINE_MS;
+    for (uint8_t i = 0; i < MAX_RETRIES && !success && millis() < deadline; i++)
+    {
         int httpCode = http.GET();
         lastHttpCode = httpCode;
 
@@ -191,69 +266,41 @@ private:
           receivedImageName = http.header("X-Photo-Name");
           success = processImageData(&http);
 
-          // After successful image download, get sleep duration
           if (success)
           {
-            // Setup new client for sleep request
-            WiFiClient *sleepBasicClient = nullptr;
+            requestedSleepSeconds = http.header("X-Sleep-Seconds").toInt();
+            HTTPClient ack;
+            WiFiClient ackBasic;
 #if EPF_ENABLE_SECURE_HTTP
-            WiFiClientSecure *sleepSecureClient = nullptr;
+            WiFiClientSecure ackSecure;
 #endif
-
+            bool ackReady = false;
             if (isHttps)
             {
-#if EPF_ENABLE_SECURE_HTTP
-              sleepSecureClient = new WiFiClientSecure;
-              sleepSecureClient->setInsecure();
-              sleepHttp.begin(*sleepSecureClient, sleepUrl);
-#endif
+ #if EPF_ENABLE_SECURE_HTTP
+ #ifdef EPF_HAS_SERVER_CA_CERT
+              ackSecure.setCACert(EpfServerCaCert);
+              ackReady = ack.begin(ackSecure, imageUrl + "/ack");
+ #endif
+ #endif
             }
             else
             {
-              sleepBasicClient = new WiFiClient;
-              sleepHttp.begin(*sleepBasicClient, sleepUrl);
+              ackReady = ack.begin(ackBasic, imageUrl + "/ack");
             }
-
-            sleepHttp.addHeader("Accept", "application/json");
-            int sleepHttpCode = sleepHttp.GET();
-
-            if (sleepHttpCode == HTTP_CODE_OK)
+            if (ackReady)
             {
-              String payload = sleepHttp.getString();
-              StaticJsonDocument<200> doc;
-              DeserializationError error = deserializeJson(doc, payload);
-
-              if (!error)
-              {
-                requestedSleepSeconds = doc["sleep_duration"] | 0;
-                if (requestedSleepSeconds > 0)
-                {
-                  requestedSleepSeconds /= 1000; // Convert to seconds
-                }
-              }
+              ack.addHeader("Authorization", String("Bearer ") + EPF_DEVICE_TOKEN);
+              ack.addHeader("X-Delivery-Id", http.header("X-Delivery-Id"));
+              success = ack.POST("") == HTTP_CODE_OK;
+              ack.end();
             }
-
-            sleepHttp.end();
-#if EPF_ENABLE_SECURE_HTTP
-            if (sleepSecureClient)
-              delete sleepSecureClient;
-#endif
-            if (sleepBasicClient)
-              delete sleepBasicClient;
           }
           break;
         }
-        else if (httpCode == HTTP_CODE_ACCEPTED)
+        else if (httpCode == HTTP_CODE_ACCEPTED || httpCode == 429 || httpCode == 502 || httpCode == 503 || httpCode == 504)
         {
-          Serial.println("Server processing, waiting...");
-          delay(RETRY_DELAY);
-        }
-        else if (httpCode == HTTP_CODE_INTERNAL_SERVER_ERROR)
-        {
-          Serial.println("Server error (500), will retry once...");
-          delay(RETRY_DELAY);
-          retryOnError = true; // Enable one retry on 500 error
-          break;               // Exit current retry loop
+          delay(RETRY_DELAY * (i + 1));
         }
         else
         {
@@ -262,7 +309,6 @@ private:
                         http.errorToString(httpCode).c_str());
           break;
         }
-      }
     }
 
     http.end();
@@ -365,120 +411,77 @@ private:
   }
 #endif
 
-  bool startSettingsServer()
-  {
-    EpfSettingsServer.setRestartCallback([]() { ESP.restart(); });
-    EpfSettingsServer.setFactoryResetCallback(resetDeviceCredentials);
-    if (!EpfSettingsServer.begin(false))
-    {
-      Serial.println(F("Settings server failed to allocate"));
-      return false;
-    }
-    EpfSettingsServer.start();
-    Serial.print(F("Settings page: http://"));
-    Serial.println(WiFi.localIP());
-    return true;
-  }
-
   // check if https
   bool startsWith(const String &str, const char *prefix)
   {
     return str.substring(0, strlen(prefix)).equalsIgnoreCase(prefix);
   }
 
-  // Checks if character is a valid delimiter in image data
-  bool isDelimiter(char c)
-  {
-    return c == ',' || c == '\n' || c == '\r' || c == '\0';
-  }
-
-  // Process image data stream and update display
+  // Download a fixed-size binary payload to SPIFFS, verify its SHA-256, and
+  // only then drive the panel. This avoids a partial panel update on a truncated
+  // or malicious response.
   bool processImageData(HTTPClient *http)
   {
     WiFiClient *stream = http->getStreamPtr();
     int contentLength = http->getSize();
-
-    // Validate content length
-    if (contentLength <= 0)
+    String checksum = http->header("X-Payload-SHA256");
+    if (http->header("X-EPF-Protocol") != "2" || http->header("X-Delivery-Id").length() != 32 ||
+        contentLength != EPF_PANEL_PAYLOAD_BYTES || checksum.length() != 64)
     {
-      Serial.println("Invalid content length");
+      Serial.println("Invalid EPF response metadata");
       return false;
     }
-    Serial.printf("Content-Length: %d bytes\n", contentLength);
-    Serial.println("Starting direct image processing...");
-
-#if EPF_USE_EPAPER
-    epd.SendCommand(0x10);
-#endif
-
-    const size_t bufferSize = EPF_USE_OLED ? 512U : BUFFER_SIZE;
-    uint8_t *buffer = (uint8_t *)malloc(bufferSize);
-    if (buffer == NULL)
+    File staged = SPIFFS.open("/epf-image.bin", FILE_WRITE);
+    if (!staged)
     {
-      Serial.println("Buffer allocation failed");
+      Serial.println("Could not stage panel payload");
       return false;
     }
-
-    String hexBuffer;
-    int totalBytesProcessed = 0;
-
-    while (contentLength > 0 && http->connected())
+    uint8_t buffer[BUFFER_SIZE];
+    uint8_t digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts_ret(&sha, 0);
+    size_t received = 0;
+    unsigned long lastData = millis();
+    while (received < EPF_PANEL_PAYLOAD_BYTES && millis() - lastData < HTTP_TIMEOUT)
     {
-      int bytesToRead = min(contentLength, (int)bufferSize);
-      int bytesRead = stream->readBytes(buffer, bytesToRead);
-
+      int bytesRead = stream->readBytes(buffer, min(sizeof(buffer), EPF_PANEL_PAYLOAD_BYTES - received));
       if (bytesRead > 0)
       {
-        for (int i = 0; i < bytesRead; i++)
-        {
-          char c = (char)buffer[i];
-          if (isDelimiter(c))
-          {
-            if (!hexBuffer.isEmpty())
-            {
-              uint8_t byteValue = (uint8_t)strtol(hexBuffer.c_str(), nullptr, 16);
-#if EPF_USE_EPAPER
-              epd.SendData(byteValue);
-#endif
-              hexBuffer.clear();
-            }
-          }
-          else
-          {
-            hexBuffer += c;
-          }
-        }
-
-        totalBytesProcessed += bytesRead;
-        contentLength -= bytesRead;
+        if (staged.write(buffer, bytesRead) != static_cast<size_t>(bytesRead)) break;
+        mbedtls_sha256_update_ret(&sha, buffer, bytesRead);
+        received += bytesRead;
+        lastData = millis();
       }
-      else
-      {
-        if (!http->connected())
-        {
-          Serial.println("HTTP connection lost!");
-          free(buffer);
-          return false;
-        }
-        delay(10);
-      }
+      else delay(10);
     }
-
-    if (!hexBuffer.isEmpty())
+    staged.close();
+    mbedtls_sha256_finish_ret(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    char actual[65];
+    for (size_t i = 0; i < sizeof(digest); ++i) sprintf(actual + (i * 2), "%02x", digest[i]);
+    actual[64] = '\0';
+    if (received != EPF_PANEL_PAYLOAD_BYTES || checksum != String(actual))
     {
-      uint8_t byteValue = (uint8_t)strtol(hexBuffer.c_str(), nullptr, 16);
-#if EPF_USE_EPAPER
-      epd.SendData(byteValue);
-#endif
+      SPIFFS.remove("/epf-image.bin");
+      Serial.println("Panel payload integrity check failed");
+      return false;
     }
-
-    free(buffer);
-    Serial.println("Image data received");
+    staged = SPIFFS.open("/epf-image.bin", FILE_READ);
+    if (!staged) return false;
 #if EPF_USE_EPAPER
+    epd.SendCommand(0x10);
+    while (staged.available())
+    {
+      size_t count = staged.read(buffer, sizeof(buffer));
+      for (size_t i = 0; i < count; ++i) epd.SendData(buffer[i]);
+    }
     epd.TurnOnDisplay();
     epd.Sleep();
 #endif
-
+    staged.close();
+    SPIFFS.remove("/epf-image.bin");
     return true;
   }
 
@@ -496,8 +499,6 @@ private:
       tailnetReady = false;
     }
 #endif
-    EpfSettingsServer.end();
-
     // Use provided sleep duration or get default from WiFi manager
     // int sleep_interval = sleepDuration > 0 ? sleepDuration : wifiManager.getServerSleepDuration();
     int sleep_interval = sleepDuration > 0 ? sleepDuration :
@@ -548,7 +549,7 @@ private:
   static void resetDeviceCredentials(void)
   {
     WifiCaptivePortal.resetSettings();
-    bool res = preferences.clear();
+    preferences.clear();
     preferences.end();
     ESP.restart();
   }
@@ -595,10 +596,9 @@ public:
     Serial.println(F("e-Paper initialized successfully"));
 #endif
 
-#if EPF_USE_EPAPER
-    // initialize spiffs
-    fs_init();
-#endif
+    // Stage the verified binary response in SPIFFS before updating the display.
+    if (!fs_init())
+      return false;
 
     // initialize preferences
     preferences.begin("data", false);
@@ -609,10 +609,7 @@ public:
     if (shouldEnterConfigMode())
     {
       Serial.println(F("Config button pressed, entering config mode..."));
-      showStatus("WiFi setup", "Open frame AP");
-#if EPF_USE_EPAPER
-      epd.Clear(EPD_7IN3E_WHITE);
-#endif
+      showProvisioningScreen();
       // epd.Sleep();
 
       bool res = WifiCaptivePortal.startPortal();
@@ -622,7 +619,6 @@ public:
 #if EPF_ENABLE_TAILSCALE
         connectTailnet();
 #endif
-        startSettingsServer();
         return true;
       }
       // else {
@@ -644,7 +640,6 @@ public:
 #if EPF_ENABLE_TAILSCALE
         connectTailnet();
 #endif
-        startSettingsServer();
         return true;
       }
       // else {
@@ -654,18 +649,23 @@ public:
     }
     else
     {
-      showStatus("WiFi setup", "Open frame AP");
+#if !EPF_HAS_CONFIG_BUTTON
+      // The prototype has no setup button. Only an unprovisioned unit opens a
+      // time-limited portal; an already-provisioned unit never does so after a
+      // routine connection failure.
+      showProvisioningScreen();
       WifiCaptivePortal.setResetSettingsCallback(resetDeviceCredentials);
-      bool res = WifiCaptivePortal.startPortal();
-      if (res)
+      if (WifiCaptivePortal.startPortal())
       {
         preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
-#if EPF_ENABLE_TAILSCALE
-        connectTailnet();
-#endif
-        startSettingsServer();
         return true;
       }
+#else
+      // Provisioning is physical-presence only. Hold the configuration button
+      // before boot rather than exposing an AP automatically on first run.
+      showStatus("Hold setup button", "to provision WiFi");
+      return false;
+#endif
       //   if (!res) {
       //     epd.Clear(EPD_7IN3E_WHITE);
       //     epd.Sleep();

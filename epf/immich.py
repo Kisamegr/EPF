@@ -6,6 +6,8 @@ settings page takes effect on the next request without a restart.
 """
 import os
 import random
+import threading
+import time
 from datetime import datetime
 
 import requests
@@ -21,6 +23,14 @@ headers = {
     'Accept': 'application/json',
     'x-api-key': apikey,
 }
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 20
+MAX_ORIGINAL_BYTES = 40 * 1024 * 1024
+MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024
+MAX_PAGES = 100
+CACHE_TTL_SECONDS = 300
+_cache_lock = threading.RLock()
+_album_cache = {'key': None, 'album_id': None, 'assets': None, 'expires': 0}
 
 class ImmichError(Exception):
     """ Carries the message and HTTP status the caller should report """
@@ -31,7 +41,11 @@ class ImmichError(Exception):
         self.status = status
 
 def base_url():
-    return config.immich()['url']
+    url = config.immich()['url']
+    # Validation is repeated for every outbound request, including after a DNS
+    # cache change. Redirects are disabled on every request below.
+    config.validate(config.current)
+    return url
 
 def album_name():
     return config.immich()['album']
@@ -42,15 +56,24 @@ def photo_link(asset_id):
 
 def resolve_album_id():
     """ Look up the configured album, raising ImmichError if it cannot be used """
-    response = requests.get(f"{base_url()}/api/albums", headers=headers)
-    if response.status_code != 200:
-        raise ImmichError("Failed to fetch albums")
+    cache_key = (base_url(), album_name())
+    with _cache_lock:
+        if _album_cache['key'] == cache_key and _album_cache['album_id'] and _album_cache['expires'] > time.monotonic():
+            return _album_cache['album_id']
+    try:
+        response = requests.get(f"{base_url()}/api/albums", headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), allow_redirects=False)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        raise ImmichError('Failed to fetch albums', 502) from error
 
     wanted = album_name()
     albumid = next((item['id'] for item in response.json()
                     if item['albumName'] == wanted), None)
     if not albumid:
         raise ImmichError("Album not found", 404)
+    with _cache_lock:
+        _album_cache.update({'key': cache_key, 'album_id': albumid, 'assets': None,
+                             'expires': time.monotonic() + CACHE_TTL_SECONDS})
     return albumid
 
 def list_album_assets(albumid):
@@ -60,19 +83,26 @@ def list_album_assets(albumid):
     Immich v3 breaking change: GET /api/albums/{id} no longer returns the
     'assets' property, so this goes through the paginated search endpoint.
     """
+    cache_key = (base_url(), album_name())
+    with _cache_lock:
+        if (_album_cache['key'] == cache_key and _album_cache['album_id'] == albumid and
+                _album_cache['assets'] is not None and _album_cache['expires'] > time.monotonic()):
+            return list(_album_cache['assets'])
     assets = []
     page = 1
-    while True:
+    while page <= MAX_PAGES:
         search_body = {
             "albumIds": [albumid],
             "size": 1000,
             "page": page,
             "withExif": True,
         }
-        response = requests.post(f"{base_url()}/api/search/metadata",
-                                 headers=headers, json=search_body)
-        if response.status_code != 200:
-            raise ImmichError("Failed to fetch album details")
+        try:
+            response = requests.post(f"{base_url()}/api/search/metadata", headers=headers, json=search_body,
+                                     timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), allow_redirects=False)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise ImmichError('Failed to fetch album details', 502) from error
 
         result = response.json().get('assets', {})
         assets.extend(result.get('items', []))
@@ -80,19 +110,39 @@ def list_album_assets(albumid):
         next_page = result.get('nextPage')
         if not next_page:
             break
-        page = int(next_page)
+        try:
+            page = int(next_page)
+        except (TypeError, ValueError) as error:
+            raise ImmichError('Invalid Immich pagination response', 502) from error
+
+    if page > MAX_PAGES:
+        raise ImmichError('Immich pagination limit exceeded', 502)
 
     if not assets:
         raise ImmichError("No images found in album", 404)
+    with _cache_lock:
+        _album_cache.update({'key': cache_key, 'album_id': albumid, 'assets': list(assets),
+                             'expires': time.monotonic() + CACHE_TTL_SECONDS})
     return assets
 
 def fetch_original(asset_id):
     """ The asset's original bytes, for the image pipeline """
-    response = requests.get(f"{base_url()}/api/assets/{asset_id}/original",
-                            headers=headers, stream=True)
-    if response.status_code != 200:
-        raise ImmichError("Failed to download image")
-    return response.content
+    try:
+        response = requests.get(f"{base_url()}/api/assets/{asset_id}/original", headers=headers, stream=True,
+                                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), allow_redirects=False)
+        response.raise_for_status()
+        declared = int(response.headers.get('Content-Length', '0') or 0)
+        if declared > MAX_ORIGINAL_BYTES:
+            raise ImmichError('Source image exceeds size limit', 413)
+        chunks, total = [], 0
+        for chunk in response.iter_content(64 * 1024):
+            total += len(chunk)
+            if total > MAX_ORIGINAL_BYTES:
+                raise ImmichError('Source image exceeds size limit', 413)
+            chunks.append(chunk)
+        return b''.join(chunks)
+    except requests.RequestException as error:
+        raise ImmichError('Failed to download image', 502) from error
 
 def fetch_thumbnail(asset_id):
     """
@@ -103,14 +153,16 @@ def fetch_thumbnail(asset_id):
     because the API key never reaches the browser.
     """
     try:
-        response = requests.get(f"{base_url()}/api/assets/{asset_id}/thumbnail",
-                                headers=headers, params={'size': 'preview'}, timeout=15)
+        response = requests.get(f"{base_url()}/api/assets/{asset_id}/thumbnail", headers=headers,
+                                params={'size': 'preview'}, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), allow_redirects=False)
     except requests.RequestException as error:
         raise ImmichError(f"Could not reach Immich: {error}", 502)
 
     if response.status_code != 200:
         raise ImmichError(f"Immich returned {response.status_code}", 502)
 
+    if len(response.content) > MAX_THUMBNAIL_BYTES:
+        raise ImmichError('Thumbnail exceeds size limit', 413)
     return response.content, response.headers.get('Content-Type', 'image/jpeg')
 
 def check_health():
@@ -123,8 +175,8 @@ def check_health():
         return {'state': 'error', 'code': 'not_configured'}
 
     try:
-        response = requests.get(f"{base_url()}/api/albums", headers=headers, timeout=6)
-    except requests.RequestException:
+        response = requests.get(f"{base_url()}/api/albums", headers=headers, timeout=(CONNECT_TIMEOUT, 6), allow_redirects=False)
+    except (requests.RequestException, ImmichError):
         return {'state': 'error', 'code': 'unreachable'}
 
     if response.status_code in (401, 403):
@@ -187,8 +239,9 @@ def select_asset(assets):
 
 def refresh_next_photo():
     """ Choose and remember the photo the frame will get next. Raises ImmichError. """
-    albumid = resolve_album_id()
-    asset = select_asset(list_album_assets(albumid))
-    state.next_photo.update({'asset': asset, 'album': album_name(),
-                             'album_id': albumid, 'chosen_at': datetime.now()})
+    with state.lock:
+        albumid = resolve_album_id()
+        asset = select_asset(list_album_assets(albumid))
+        state.next_photo.update({'asset': asset, 'album': album_name(),
+                                 'album_id': albumid, 'chosen_at': datetime.now()})
     return asset

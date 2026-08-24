@@ -1,6 +1,7 @@
 #include <filesystem.h>
 #include <Arduino.h>
 #include <SPIFFS.h>
+#include "config.h"
 
 bool fs_init(void)
 {
@@ -9,11 +10,14 @@ bool fs_init(void)
         ESP.restart();
         return false;
     }
-    else
+    if (SPIFFS.totalBytes() < EPF_STAGING_MIN_BYTES)
     {
-        Serial.println(F("Filesystem initialized"));
-        return true;
+        Serial.printf("SPIFFS too small: %u bytes, need at least %u\n", SPIFFS.totalBytes(), EPF_STAGING_MIN_BYTES);
+        SPIFFS.end();
+        return false;
     }
+    Serial.println(F("Filesystem initialized"));
+    return true;
 }
 
 /**

@@ -243,18 +243,20 @@ void DeviceSettingsServer::installRoutes()
         return;
 
     _server->on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!_captive && !authorized(request, false))
+            return;
         request->send_P(200, "text/html", hasAdminPassword() ? DEVICE_SETTINGS_PAGE : DEVICE_ADMIN_SETUP_PAGE);
     });
 
     auto bootstrapHandler = new AsyncCallbackJsonWebHandler("/api/bootstrap", [this](AsyncWebServerRequest *request, JsonVariant &json) {
-        if (hasAdminPassword())
+        if (!_captive || hasAdminPassword())
         {
             request->send(409, "application/json", "{\"error\":\"admin password already configured\"}");
             return;
         }
 
         String password = json["admin_password"] | "";
-        if (password.length() < 8 || password.length() > 95)
+        if (password.length() < 12 || password.length() > 95)
         {
             request->send(400, "application/json", "{\"error\":\"admin password must be 8 to 95 characters\"}");
             return;
@@ -269,10 +271,12 @@ void DeviceSettingsServer::installRoutes()
     _server->addHandler(bootstrapHandler);
 
     _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!authorized(request, false)) return;
         request->send(200, "application/json", statusJson());
     });
 
     _server->on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!authorized(request, false)) return;
         request->send(200, "application/json", settingsJson());
     });
 

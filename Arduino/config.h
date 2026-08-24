@@ -10,6 +10,11 @@
 #if __has_include("tailscale_secrets.h")
 #include "tailscale_secrets.h"
 #endif
+#if defined(__has_include)
+#if __has_include("device_secrets.h")
+#include "device_secrets.h"
+#endif
+#endif
 #endif
 
 // File system configuration
@@ -49,9 +54,16 @@
 #endif
 
 // Buffer configuration
-#define BUFFER_SIZE 131072U // Buffer size for image processing
+#define BUFFER_SIZE 4096U // Fixed streaming buffer; panel payload is stored in SPIFFS for validation.
+#define EPF_PANEL_PAYLOAD_BYTES 192000U
+#define EPF_STAGING_MIN_BYTES (EPF_PANEL_PAYLOAD_BYTES + 32768U)
+#define EPF_WAKE_DEADLINE_MS 120000U
+#define EPF_FAILURE_SLEEP_SECONDS 3600U
 
-#define SERVER_BASE_URL "http://192.168.1.134:15001"
+#define SERVER_BASE_URL "https://frame.example.net"
+#ifndef EPF_DEVICE_TOKEN
+#define EPF_DEVICE_TOKEN ""
+#endif
 
 // Runtime settings stored in the existing "data" NVS namespace.
 #define PREFERENCES_ADMIN_PASSWORD "admin_password"

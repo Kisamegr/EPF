@@ -1,0 +1,14 @@
+.env
+.git
+.pio
+.vscode
+Arduino/tailscale_secrets.h
+config/
+photos/
+sdkconfig.*
+*.log
+CAD/
+__pycache__/
+*.py[cod]
+*.so
+*.STEP

@@ -32,7 +32,7 @@ fieldset.panel{margin-top:1rem}legend{padding:0 .35rem;font-weight:700}.actions{
 <label for="wifiPassword">Wi-Fi password</label><input id="wifiPassword" type="password" autocomplete="off">
 </fieldset>
 <fieldset class="panel"><legend>Frame connection</legend>
-<label for="serverUrl">EPF server URL</label><input id="serverUrl" placeholder="http://192.168.1.134:15001">
+<label for="serverUrl">EPF server URL</label><input id="serverUrl" placeholder="https://frame.example.net">
 </fieldset>
 <fieldset class="panel"><legend>Portal security</legend>
 <p class="muted">This password protects the frame settings page. The username is <b>admin</b>.</p>

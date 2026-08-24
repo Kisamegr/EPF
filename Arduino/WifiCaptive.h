@@ -10,8 +10,7 @@
 #include <ArduinoJson.h>
 #include "DeviceSettingsServer.h"
 
-#define WIFI_SSID "ESP32_ePAPER"
-#define WIFI_PASSWORD "epf-setup"
+#define WIFI_SSID "EPF-Setup"
 
 // Define the DNS interval in milliseconds between processing DNS requests
 #define DNS_INTERVAL 60
@@ -75,6 +74,7 @@ private:
     std::vector<Network> combineNetworks(std::vector<Network> &scanResults, WifiCaptive::WifiCredentials wifiCredentials[]);
 
 public:
+    static String provisioningPassword();
     /// @brief Starts WiFi configuration portal.
     /// @return True if successfully connected to provided SSID, false otherwise.
     bool startPortal();

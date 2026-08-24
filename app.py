@@ -7,25 +7,32 @@ contract with the firmware is /download and /sleep; the rest serves the settings
 page. Run with `python app.py`, or `docker compose up -d`.
 """
 import io
+import hashlib
+import json
 import os
 import threading
 import time
+import atexit
 from datetime import datetime, timedelta
 
-import ntplib
-from flask import (Flask, jsonify, redirect, render_template, request, send_file,
-                   url_for)
+from flask import (Flask, jsonify, make_response, redirect, render_template, request, send_file,
+                   session, url_for)
 from epf import (battery, config, credentials, eventlog, imaging, immich, notify,
                  state, tracking)
+from epf import deliveries, security
 
 app = Flask(__name__)
+security.configure(app)
+security.protect_routes(app)
+_observer = None
+_initialized = False
 
 # ---------------------------------------------------------------- template glue
 
 @app.context_processor
 def inject_current_year():
     """ Expose the current year to every template, so the footer never goes stale """
-    return {'current_year': datetime.now().year}
+    return {'current_year': datetime.now().year, 'csrf_token': security.csrf_token()}
 
 @app.context_processor
 def inject_static_url():
@@ -83,6 +90,31 @@ def _fresh_battery():
 
 # --------------------------------------------------------------- settings page
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """The sole public administrator entrypoint; credentials never live in config.yaml."""
+    if request.method == 'POST':
+        client = request.remote_addr or 'unknown'
+        if not security.configured():
+            return render_template('login.html', error='Server credentials are not configured.'), 503
+        if not security.login_allowed(client):
+            eventlog.record('login_rate_limited', ip=eventlog.client_ip())
+            return render_template('login.html', error='Invalid credentials.'), 429
+        if security.verify_admin_password(request.form.get('password', '')):
+            session.clear()
+            session['admin'] = True
+            security.csrf_token()
+            security.clear_login_failures(client)
+            return redirect(security.local_redirect_target(request.args.get('next'), url_for('settings')))
+        security.record_login_failure(client)
+        eventlog.record('login_failed', ip=eventlog.client_ip())
+        return render_template('login.html', error='Invalid credentials.'), 401
+    return render_template('login.html', error=None)
+
+@app.route('/healthz')
+def healthz():
+    return jsonify({'ok': bool(security.configured())}), 200 if security.configured() else 503
+
 @app.route('/setting', methods=['GET', 'POST'])
 def settings():
     voltage = _fresh_battery()
@@ -99,7 +131,8 @@ def settings():
                                defaults=_flat_defaults(),
                                battery_voltage=voltage,
                                battery_percentage=percentage,
-                               error=error)
+                               error=error,
+                               csrf_token=security.csrf_token())
 
     if request.method != 'POST':
         return render()
@@ -133,13 +166,10 @@ def settings():
             except (TypeError, ValueError):
                 return render(error=f"'{key}' is not a valid number")
 
-    if submitted['immich']['rotation'] not in [0, 90, 180, 270]:
-        return render(error="Rotation must be 0, 90, 180, or 270 degrees")
-
     try:
         config.write_file(submitted)
-    except Exception as error:
-        return render(error=f"Error saving configuration: {error}")
+    except (ValueError, OSError) as error:
+        return render(error=f"Configuration was not saved: {error}")
 
     # Record only the fields that actually moved, so the log stays useful
     changes = {}
@@ -366,42 +396,41 @@ def process_and_download():
         return jsonify({"error": message}), 500
 
     try:
-        # Use the photo already chosen for this wake-up when there is one, so the
-        # frame gets exactly what the settings page was showing as "next".
-        if state.next_photo['asset'] and state.next_photo['album'] == album:
-            selected = state.next_photo['asset']
-            albumid = state.next_photo['album_id']
+        # An unacknowledged delivery is immutable: every retry returns identical
+        # bytes and never advances photo history.
+        active = deliveries.active()
+        if active:
+            delivery_id, asset_id, delivery_album, payload = active
+            if delivery_album != album:
+                return jsonify(error='delivery_pending'), 409
+            selected, albumid = {'id': asset_id}, None
         else:
-            albumid = immich.resolve_album_id()
-            selected = immich.select_asset(immich.list_album_assets(albumid))
+            with state.lock:
+                if state.next_photo['asset'] and state.next_photo['album'] == album:
+                    selected = state.next_photo['asset']
+                    albumid = state.next_photo['album_id']
+                else:
+                    albumid = immich.resolve_album_id()
+                    selected = immich.select_asset(immich.list_album_assets(albumid))
+                asset_id = selected['id']
+                settings_now = config.immich()
+                settings_hash = hashlib.sha256(json.dumps({key: settings_now[key] for key in ('rotation', 'display_mode', 'enhanced', 'contrast', 'strength')}, sort_keys=True).encode()).hexdigest()
+                payload = deliveries.cached_payload(asset_id, settings_hash)
+                if payload is None:
+                    image = imaging.open_asset(io.BytesIO(immich.fetch_original(asset_id)), selected.get('originalPath'))
+                    processed = imaging.scale_img_in_memory(image, rotation=settings_now['rotation'], display_mode=settings_now['display_mode'], enhanced=settings_now['enhanced'], contrast=settings_now['contrast'], strength=settings_now['strength'])
+                    payload = imaging.pack_binary_for_panel(processed)
+                    deliveries.cache_payload(asset_id, settings_hash, payload)
+                delivery_id, asset_id, _, payload = deliveries.create(asset_id, album, payload)
 
-        # Handed over, so it is no longer "next"; the settings page asks for a
-        # fresh one the next time it loads.
-        state.clear_next_photo()
-
-        asset_id = selected['id']
-        tracking.mark_shown(asset_id)
-
-        image = imaging.open_asset(io.BytesIO(immich.fetch_original(asset_id)),
-                                   selected.get('originalPath'))
-
-        settings_now = config.immich()
-        processed = imaging.scale_img_in_memory(
-            image,
-            rotation=settings_now['rotation'],
-            display_mode=settings_now['display_mode'],
-            enhanced=settings_now['enhanced'],
-            contrast=settings_now['contrast'],
-            strength=settings_now['strength'],
-        )
-
-        c_code = imaging.pack_bmp_for_panel(processed)
-
-        state.last_photo.update({'asset_id': asset_id, 'shown_at': datetime.now(),
-                                 'taken_at': immich.taken_at_text(selected)})
-
-        response = send_file(c_code, mimetype='text/plain', as_attachment=True,
-                             download_name=f"image_{asset_id}.c")
+        response = make_response(payload)
+        response.mimetype = 'application/octet-stream'
+        response.headers['Content-Length'] = str(len(payload))
+        response.headers['X-EPF-Protocol'] = '2'
+        response.headers['X-Delivery-Id'] = delivery_id
+        response.headers['X-Asset-Id'] = asset_id
+        response.headers['X-Payload-SHA256'] = hashlib.sha256(payload).hexdigest()
+        response.headers['X-Sleep-Seconds'] = str(_sleep_duration_seconds())
         # The OLED emulator uses this header to show the original photo name
         # while still consuming the same prepared panel payload as the frame.
         photo_name = selected.get('originalFileName') or f"image_{asset_id}"
@@ -410,8 +439,8 @@ def process_and_download():
             'ascii', 'replace'
         ).decode('ascii')
         # Deep link for writing an NFC tag; the firmware does not read it yet
-        response.headers['X-Photo-Url'] = \
-            f"https://my.immich.app/albums/{albumid}/photos/{asset_id}"
+        if albumid:
+            response.headers['X-Photo-Url'] = f"https://my.immich.app/albums/{albumid}/photos/{asset_id}"
 
         # MAC and signal strength are only here if the firmware sends them: HTTP
         # carries no MAC and the container cannot read the LAN's ARP table.
@@ -433,8 +462,74 @@ def process_and_download():
         eventlog.record('error', where='download', message=error.message, ip=eventlog.client_ip())
         return jsonify({"error": error.message}), error.status
     except Exception as error:
-        eventlog.record('error', where='download', message=str(error), ip=eventlog.client_ip())
-        return jsonify({"error": str(error)}), 500
+        eventlog.record('error', where='download', message=type(error).__name__, ip=eventlog.client_ip())
+        return jsonify({"error": 'download_failed'}), 500
+
+@app.route('/ack', methods=['POST'])
+def acknowledge_delivery():
+    delivery_id = request.headers.get('X-Delivery-Id', '')
+    active = deliveries.active()
+    if not delivery_id or not active or active[0] != delivery_id:
+        return jsonify(error='unknown_delivery'), 409
+    _, asset_id, _album, _payload = active
+    # Tracking is idempotent. Write it before the acknowledgement so a storage
+    # failure keeps the valid delivery retryable rather than losing history.
+    if not tracking.mark_shown(asset_id):
+        eventlog.record('error', where='ack', message='tracking_write_failed', ip=eventlog.client_ip())
+        return jsonify(error='tracking_write_failed'), 503
+    acknowledged = deliveries.acknowledge(delivery_id)
+    if not acknowledged:
+        return jsonify(error='unknown_delivery'), 409
+    with state.lock:
+        state.clear_next_photo()
+        state.last_photo.update({'asset_id': asset_id, 'shown_at': datetime.now(), 'taken_at': ''})
+    eventlog.record('delivery_acknowledged', delivery_id=delivery_id, ip=eventlog.client_ip())
+    return jsonify(acknowledged=True)
+
+@app.route('/delivery/cancel', methods=['POST'])
+def cancel_delivery():
+    """Administrator recovery action for a lost or replaced frame."""
+    delivery_id = deliveries.cancel_active()
+    if delivery_id is None:
+        return jsonify(cancelled=False, error='no_active_delivery'), 404
+    eventlog.record('delivery_cancelled', delivery_id=delivery_id, ip=eventlog.client_ip())
+    return jsonify(cancelled=True, delivery_id=delivery_id)
+
+@app.route('/delivery', methods=['GET'])
+def delivery_status():
+    active = deliveries.active()
+    if active is None:
+        return jsonify(active=False)
+    delivery_id, asset_id, album, _payload = active
+    return jsonify(active=True, delivery_id=delivery_id, asset_id=asset_id, album=album)
+
+def _sleep_data():
+    """Sleep metadata shared by the authenticated compatibility endpoint and /download."""
+    now = datetime.now()
+    settings_now = config.immich()
+    interval = int(settings_now['wakeup_interval'])
+    def next_interval(base_time, intervals=1):
+        total_minutes = base_time.hour * 60 + base_time.minute
+        upcoming = interval * ((total_minutes // interval) + intervals)
+        candidate = base_time.replace(hour=(upcoming % 1440) // 60, minute=upcoming % 60, second=0, microsecond=0)
+        return candidate + timedelta(days=1) if candidate < base_time else candidate
+    next_wakeup = next_interval(now)
+    sleep_start = now.replace(hour=settings_now['sleep_start_hour'], minute=settings_now['sleep_start_minute'], second=0, microsecond=0)
+    sleep_end = now.replace(hour=settings_now['sleep_end_hour'], minute=settings_now['sleep_end_minute'], second=0, microsecond=0)
+    if sleep_end < sleep_start:
+        if now >= sleep_start: sleep_end += timedelta(days=1)
+        elif now < sleep_end: sleep_start -= timedelta(days=1)
+    if sleep_start <= next_wakeup < sleep_end:
+        next_wakeup = sleep_end
+    sleep_ms = int((next_wakeup - now).total_seconds() * 1000)
+    if sleep_ms < 600000:
+        next_wakeup = next_interval(now, 2)
+        if sleep_start <= next_wakeup < sleep_end: next_wakeup = sleep_end
+        sleep_ms = int((next_wakeup - now).total_seconds() * 1000)
+    return {'current_time': now.strftime('%Y-%m-%d %H:%M:%S'), 'next_wakeup': next_wakeup.strftime('%Y-%m-%d %H:%M:%S'), 'sleep_duration': sleep_ms}
+
+def _sleep_duration_seconds():
+    return max(1, _sleep_data()['sleep_duration'] // 1000)
 
 @app.route('/sleep', methods=['GET'])
 def get_sleep_duration():
@@ -442,104 +537,40 @@ def get_sleep_duration():
     How long the frame should sleep, in milliseconds. Derived from local time, so
     TZ has to be set or the quiet hours land at the wrong time of day.
     """
-    now = datetime.now()
-    settings_now = config.immich()
-    interval = int(settings_now['wakeup_interval'])
-
-    def next_interval(base_time, intervals=1):
-        total_minutes = base_time.hour * 60 + base_time.minute
-        upcoming = interval * ((total_minutes // interval) + intervals)
-        upcoming = upcoming % (24 * 60)  # wrap around midnight
-
-        candidate = base_time.replace(hour=upcoming // 60, minute=upcoming % 60,
-                                      second=0, microsecond=0)
-        if candidate < base_time:
-            candidate = candidate + timedelta(days=1)
-        return candidate
-
-    next_wakeup = next_interval(now)
-
-    sleep_start = now.replace(hour=settings_now['sleep_start_hour'],
-                              minute=settings_now['sleep_start_minute'],
-                              second=0, microsecond=0)
-    sleep_end = now.replace(hour=settings_now['sleep_end_hour'],
-                            minute=settings_now['sleep_end_minute'],
-                            second=0, microsecond=0)
-
-    # The window crosses midnight when the end is before the start
-    if sleep_end < sleep_start:
-        if now >= sleep_start:
-            sleep_end = sleep_end + timedelta(days=1)
-        elif now < sleep_end:
-            sleep_start = sleep_start - timedelta(days=1)
-
-    if sleep_start <= next_wakeup < sleep_end:
-        next_wakeup = sleep_end
-
-    sleep_ms = int((next_wakeup - now).total_seconds() * 1000)
-
-    # Waking again in under ten minutes is not worth the radio; skip a slot
-    if sleep_ms < 600000:
-        next_wakeup = next_interval(now, intervals=2)
-        if sleep_start <= next_wakeup < sleep_end:
-            next_wakeup = sleep_end
-        sleep_ms = int((next_wakeup - now).total_seconds() * 1000)
-
-    # Deliberately not logged: /sleep runs on every wake-up and its answer is
-    # implied by the check-in, so it only crowded out the entries that matter.
-    return jsonify({
-        "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "next_wakeup": next_wakeup.strftime("%Y-%m-%d %H:%M:%S"),
-        "sleep_duration": sleep_ms,
-    })
+    return jsonify(_sleep_data())
 
 # -------------------------------------------------------------------- start-up
 
-def sync_time_with_ntp():
-    """
-    The time according to NTP.
+def initialize_application():
+    """Initialize exactly once per worker; Gunicorn imports this module directly."""
+    global _observer, _initialized
+    if _initialized:
+        return
+    if not security.configured(app):
+        raise RuntimeError('EPF_SESSION_SECRET, EPF_ADMIN_PASSWORD_HASH, and EPF_DEVICE_TOKEN are required')
+    config.ensure_file()
+    config.verify_storage()
+    loaded = config.read_file()
+    if loaded is None:
+        raise RuntimeError('No valid configuration file is available')
+    config.apply(loaded)
+    _observer = config.start_watcher(config.apply)
+    eventlog.record('startup')
+    _initialized = True
 
-    Note this only *reports* the time: nothing sets the system clock from it, so
-    a wrong clock in the container stays wrong. TZ is what matters in practice.
-    """
-    try:
-        client = ntplib.NTPClient()
-        response = client.request('pool.ntp.org', timeout=5)
-        return datetime.fromtimestamp(response.tx_time)
-    except Exception as error:
-        print(f"NTP sync failed: {error}")
-        return datetime.now()
+def _stop_observer():
+    if _observer:
+        _observer.stop()
+        _observer.join(timeout=5)
 
-def run_daily_ntp_sync():
-    """ Report the NTP time once a day, a little after 04:00 """
-    while True:
-        try:
-            now = datetime.now()
-            next_sync = now.replace(hour=4, minute=11, second=0, microsecond=0)
-            if now >= next_sync:
-                next_sync = next_sync + timedelta(days=1)
-
-            time.sleep((next_sync - now).total_seconds())
-
-            synced = sync_time_with_ntp()
-            print(f"Daily NTP sync completed at {synced.strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception as error:
-            print(f"Error in daily NTP sync: {error}")
-            time.sleep(3600)
+atexit.register(_stop_observer)
 
 def main():
-    observer = config.start_watcher(config.apply)
+    if os.environ.get('EPF_ALLOW_DEV_SERVER') != '1':
+        raise RuntimeError('Direct Flask serving is disabled; run the Gunicorn command from Dockerfile.')
+    app.run(host='0.0.0.0', port=5000, use_reloader=False)
 
-    try:
-        config.apply(config.read_file())
-        eventlog.record('startup')
-
-        threading.Thread(target=run_daily_ntp_sync, daemon=True).start()
-
-        app.run(host='0.0.0.0', port=5000, use_reloader=False)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+initialize_application()
 
 if __name__ == '__main__':
     main()

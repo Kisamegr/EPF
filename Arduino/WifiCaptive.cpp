@@ -126,6 +126,12 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
         Preferences settings;
         settings.begin("data", false);
         String admin_password = data["admin_password"] | "";
+        if (admin_password.length() > 0 && admin_password != "********" && (admin_password.length() < 12 || admin_password.length() > 95))
+        {
+            settings.end();
+            request->send(400, "application/json", "{\"error\":\"administrator password must be 12 to 95 characters\"}");
+            return;
+        }
         if (admin_password.length() > 0 && admin_password != "********")
             settings.putString(PREFERENCES_ADMIN_PASSWORD, admin_password);
         if (data.containsKey("tailscale_enabled"))
@@ -140,9 +146,15 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
             settings.putBool(PREFERENCES_TAILSCALE_ENABLED, enabled);
         }
         String tailscale_name = data["tailscale_name"] | "";
-        if (tailscale_name.length() > 0)
+        if (tailscale_name.length() > 0 && tailscale_name.length() <= 47)
             settings.putString(PREFERENCES_TAILSCALE_NAME, tailscale_name);
         String tailscale_key = data["tailscale_auth_key"] | "";
+        if (tailscale_key.length() > 0 && tailscale_key != "********" && (!tailscale_key.startsWith("tskey-") || tailscale_key.length() > 95))
+        {
+            settings.end();
+            request->send(400, "application/json", "{\"error\":\"invalid Tailscale auth key\"}");
+            return;
+        }
         if (tailscale_key.length() > 0 && tailscale_key != "********")
             settings.putString(PREFERENCES_TAILSCALE_AUTH_KEY, tailscale_key);
         settings.end();
@@ -190,8 +202,10 @@ bool WifiCaptive::startPortal()
     delay(50);
 
     // Start the soft access point with the given ssid, password, channel, max number of clients
-    // WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL, 0, MAX_CLIENTS);
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, random(1, 11), 0, MAX_CLIENTS);
+    // The AP password is derived per device below rather than shared globally.
+    String apPassword = provisioningPassword();
+    Serial.printf("Provisioning AP password: %s\n", apPassword.c_str());
+    WiFi.softAP(WIFI_SSID, apPassword.c_str(), random(1, 11), 0, MAX_CLIENTS);
     delay(50);
 
     // Disable AMPDU RX on the ESP32 WiFi to fix a bug on Android
@@ -306,6 +320,7 @@ void WifiCaptive::resetSettings()
     preferences.remove(PREFERENCES_TAILSCALE_NAME);
     preferences.remove(PREFERENCES_TAILSCALE_AUTH_KEY);
     preferences.remove(PREFERENCES_REFRESH_RATE);
+    preferences.remove("provisioning_password");
     preferences.end();
 
     for (int i = 0; i < WIFI_MAX_SAVED_CREDS; i++)
@@ -426,6 +441,46 @@ void WifiCaptive::saveWifiCredentials(String ssid, String pass, String url)
     if (url.length() > 0)
         preferences.putString("SERVER_BASE_URL", url);
     preferences.end();
+}
+
+String WifiCaptive::provisioningPassword()
+{
+    // ESP32 NVS keys are limited to 15 characters.  Keep a cached value too,
+    // so the on-device display and access point cannot diverge during setup.
+    static String cachedPassword;
+    if (cachedPassword.length() == 12)
+        return cachedPassword;
+
+    static constexpr char passwordKey[] = "prov_pass";
+    Preferences settings;
+    if (settings.begin("data", false))
+    {
+        String stored = settings.getString(passwordKey, "");
+        if (stored.length() == 12)
+        {
+            settings.end();
+            cachedPassword = stored;
+            return cachedPassword;
+        }
+
+        static constexpr char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        char password[13] = "epf-";
+        for (size_t i = 4; i < 12; ++i)
+            password[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+        password[12] = '\0';
+        settings.putString(passwordKey, password);
+        settings.end();
+        cachedPassword = password;
+        return cachedPassword;
+    }
+
+    static constexpr char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    char password[13] = "epf-";
+    for (size_t i = 4; i < 12; ++i)
+        password[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+    password[12] = '\0';
+    cachedPassword = password;
+    return cachedPassword;
 }
 
 void WifiCaptive::saveRemoteWifiCredentials(const String &ssid, const String &pass)

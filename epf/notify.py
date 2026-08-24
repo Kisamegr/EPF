@@ -11,14 +11,18 @@ message actually got through.
 LINE needs the Messaging API: LINE Notify, which took a single token, was
 discontinued in 2025.
 """
+import queue
 import threading
 import time
 
 import requests
 
-from . import config, credentials, eventlog, state
+from . import config, credentials, deliveries, eventlog, state
 
 CHANNELS = ('telegram', 'line')
+_jobs = queue.Queue(maxsize=16)
+_workers_started = False
+_worker_lock = threading.Lock()
 
 class NotifyError(Exception):
     """ Carries a short code so the caller can log or report it """
@@ -95,7 +99,8 @@ def send_in_background(text, event='notified', **fields):
     This is called from /download, and the frame gives up after 50 seconds, so a
     slow or unreachable notification service must not sit in that request.
     """
-    def run():
+    def run(job):
+        text, event, fields = job
         for channel in send_channels():
             try:
                 send(text, channel)
@@ -104,7 +109,21 @@ def send_in_background(text, event='notified', **fields):
                 eventlog.record('error', where='notify', message=error.code,
                                 detail=error.detail, channel=channel)
 
-    threading.Thread(target=run, daemon=True).start()
+    global _workers_started
+    with _worker_lock:
+        if not _workers_started:
+            for _ in range(2):
+                threading.Thread(target=lambda: _worker_loop(run), daemon=True).start()
+            _workers_started = True
+    try:
+        _jobs.put_nowait((text, event, fields))
+    except queue.Full:
+        eventlog.record('error', where='notify', message='queue_full')
+
+def _worker_loop(worker):
+    while True:
+        worker(_jobs.get())
+        _jobs.task_done()
 
 def check_battery(percentage, voltage):
     """
@@ -125,11 +144,8 @@ def check_battery(percentage, voltage):
         return False
 
     interval = float(settings['min_interval_hours']) * 3600
-    since = time.time() - state.notify['last_sent']
-    if state.notify['last_sent'] and since < interval:
+    if not deliveries.claim_notification('low_battery', interval):
         return False
-
-    state.notify['last_sent'] = time.time()
     send_in_background(
         f"E-paper frame battery low: {percentage:.1f}% ({int(voltage)} mV)",
         event='notified', reason='battery_low',

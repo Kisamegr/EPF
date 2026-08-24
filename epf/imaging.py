@@ -248,6 +248,22 @@ def convert_to_c_code_in_memory(image_data):
     output_bytes.seek(0)
     return output_bytes
 
+def pack_binary_for_panel(bmp_io):
+    """Return exactly 800×480×4-bit packed panel bytes for protocol v2."""
+    bmp_io.seek(0)
+    pixels = np.array(Image.open(bmp_io))
+    indices = depalette_image(pixels, palette)
+    height, width = indices.shape
+    if (width, height) != (800, 480):
+        raise ValueError('panel image dimensions are invalid')
+    packed = bytearray()
+    for y in range(height):
+        for x in range(0, width, 2):
+            packed.append((int(indices[y, x]) << 4) | int(indices[y, x + 1]))
+    if len(packed) != 192000:
+        raise ValueError('panel payload size is invalid')
+    return bytes(packed)
+
 def pack_bmp_for_panel(bmp_io):
     """ Open a BMP produced by scale_img_in_memory and pack it for the firmware """
     bmp_io.seek(0)

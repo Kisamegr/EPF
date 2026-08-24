@@ -4,22 +4,32 @@
 # setting saved from the web page silently reverts to DEFAULT_CONFIG and the
 # shown-photo history in tracking.txt is lost on the next `docker compose pull`.
 #
-#   1. create a .env file next to this one containing IMMICH_API_KEY=...
-#   2. docker compose up -d
+#   1. create writable config and photos directories owned by UID 10001
+#   2. create a .env file next to this one containing the required secrets
+#   3. docker compose up -d
 #
 services:
   epf:
-    image: jwchen119/epf
+    build: .
+    image: epf:0.2.0
     # To run a locally built image instead of the published one, comment out
     # `image:` above and uncomment this:
     # build: .
     restart: unless-stopped
     ports:
-      - "${EPF_PORT:-15001}:5000"
+      # Keep the administration service local by default. Set EPF_BIND_ADDRESS
+      # to one explicit LAN address only when a separate trusted reverse proxy
+      # needs to reach this host.
+      - "${EPF_BIND_ADDRESS:-127.0.0.1}:${EPF_PORT:-15001}:5000"
     environment:
       # Required. Compose refuses to start if this is unset, which is better than
       # booting with no key and having every Immich request come back 401.
       IMMICH_API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is not set - create a .env file next to docker-compose.yml}
+      IMMICH_ALLOWED_ORIGINS: ${IMMICH_ALLOWED_ORIGINS:?Set the exact approved Immich IP-literal origin, e.g. https://192.0.2.10}
+      IMMICH_ALLOWED_IPS: ${IMMICH_ALLOWED_IPS:?Set the approved resolved IPv4/IPv6 address(es) for Immich}
+      EPF_ADMIN_PASSWORD_HASH: ${EPF_ADMIN_PASSWORD_HASH:?Set a Werkzeug password hash for the administrator}
+      EPF_DEVICE_TOKEN: ${EPF_DEVICE_TOKEN:?Set a long random bearer token for this single-frame deployment}
+      EPF_SESSION_SECRET: ${EPF_SESSION_SECRET:?Set a long random session secret}
       # datetime.now() drives both the sleep window and the wake-up schedule, and
       # the base image has no timezone set, so without this they are evaluated in
       # UTC and land at the wrong hours. Zone data is already in the image.
@@ -27,11 +37,19 @@ services:
     volumes:
       - ./config:/config
       - ./photos:/photos
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
     healthcheck:
       # The base image ships neither curl nor wget, so probe with python itself.
       # /sleep only reads the config, so this never reaches out to Immich.
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5000/sleep', timeout=5)"]
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/healthz', timeout=5)"]
       interval: 60s
       timeout: 10s
       retries: 3

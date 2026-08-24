@@ -152,6 +152,7 @@
 
 
         <form id="settingsForm" method="POST" onsubmit="handleSubmit(event)">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="card">
                 <div class="card-head">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
@@ -421,6 +422,16 @@
                     onclick="showResetConfirmation()">Reset to Default</button>
             </div>
         </form>
+
+        <div class="card">
+            <div class="card-head">
+                <h2 class="card-title">Frame delivery</h2>
+            </div>
+            <p class="hint" id="deliveryStatus">Checking for a pending delivery…</p>
+            <button type="button" class="reset-btn" id="cancelDeliveryButton" onclick="cancelDelivery()" disabled>
+                Release pending delivery
+            </button>
+        </div>
 
         <div class="card log-card">
             <div class="card-head">

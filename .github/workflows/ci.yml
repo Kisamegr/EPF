@@ -1,0 +1,22 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.9' }
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+      - run: docker build --no-cache -t epf:test .
+      - run: docker run --rm epf:test sh -c '! test -e /app/.env && ! test -e /app/.git && ! test -e /app/Arduino/tailscale_secrets.h'
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: platformio/action@v1
+      - run: pio run -e prototype_oled
+      - run: pio run -e prototype_oled_tailscale
+      - run: pio run -e ee04_epaper
+      - run: pio run -e ee04_epaper_tailscale

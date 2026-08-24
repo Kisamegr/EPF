@@ -69,6 +69,9 @@ def clear():
         open(log_file, 'w').close()
 
 def client_ip():
-    """ The caller's address, honouring a proxy header when one is present """
+    """Trust forwarded headers only from explicitly configured proxies."""
+    trusted = {item.strip() for item in os.environ.get('EPF_TRUSTED_PROXIES', '').split(',') if item.strip()}
     forwarded = request.headers.get('X-Forwarded-For', '')
-    return forwarded.split(',')[0].strip() if forwarded else request.remote_addr
+    if request.remote_addr in trusted and forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr

@@ -117,7 +117,7 @@ function renderNext(info) {
 }
 
 function loadNext(method) {
-    fetch('next', { method: method || 'GET', cache: 'no-store' })
+    epfFetch('next', { method: method || 'GET', cache: 'no-store' })
         .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
         .then(renderNext)
         .catch(() => renderNext(null));
@@ -166,7 +166,7 @@ function renderChannels() {
 }
 
 function loadChannels() {
-    fetch('notify/channels', { cache: 'no-store' })
+    epfFetch('notify/channels', { cache: 'no-store' })
         .then(response => response.json())
         .then(payload => {
             channelFields = payload.fields || {};
@@ -230,7 +230,7 @@ function submitBinding() {
     save.disabled = true;
     save.textContent = t('bind.testing');
 
-    fetch('notify/bind', { method: 'POST', body: body, cache: 'no-store' })
+    epfFetch('notify/bind', { method: 'POST', body: body, cache: 'no-store' })
         .then(response => response.json().then(payload => ({ ok: response.ok, payload })))
         .then(({ ok, payload }) => {
             save.disabled = false;
@@ -260,7 +260,7 @@ function submitBinding() {
 function unbindChannel() {
     const body = new FormData();
     body.append('channel', bindingChannel);
-    fetch('notify/unbind', { method: 'POST', body: body, cache: 'no-store' })
+    epfFetch('notify/unbind', { method: 'POST', body: body, cache: 'no-store' })
         .then(response => response.json())
         .then(payload => {
             channelState = payload.channels || channelState;
@@ -272,7 +272,7 @@ function unbindChannel() {
 }
 
 function testNotification() {
-    fetch('notify/test', { method: 'POST', cache: 'no-store' })
+    epfFetch('notify/test', { method: 'POST', cache: 'no-store' })
         .then(response => response.json().then(payload => ({ ok: response.ok, payload })))
         .then(({ ok, payload }) => {
             showNotification(ok ? t('notify.testSent')
@@ -283,7 +283,7 @@ function testNotification() {
 }
 
 function clearLog() {
-    fetch('log/clear', { method: 'POST', cache: 'no-store' })
+    epfFetch('log/clear', { method: 'POST', cache: 'no-store' })
         .then(() => loadLog())
         .catch(() => loadLog());
 }
@@ -544,7 +544,7 @@ function renderLog() {
 }
 
 function loadLog() {
-    fetch('log?limit=60', { cache: 'no-store' })
+    epfFetch('log?limit=60', { cache: 'no-store' })
         .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
         // Treat an unexpected shape as a failure rather than letting
         // renderLog() trip over an undefined list
@@ -556,11 +556,49 @@ function loadLog() {
 }
 
 function fetchStatus() {
-    fetch('status', { cache: 'no-store' })
+    epfFetch('status', { cache: 'no-store' })
         .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
         .then(payload => { lastStatus = payload; })
         .catch(() => { lastStatus = 'failed'; })
         .then(renderStatus);
+}
+
+const epfCsrfToken = () => document.querySelector('input[name="csrf_token"]')?.value || '';
+const epfFetch = (url, options = {}) => {
+    const method = (options.method || 'GET').toUpperCase();
+    const headers = new Headers(options.headers || {});
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRF-Token', epfCsrfToken());
+    return fetch(url, { ...options, headers });
+};
+
+function loadDelivery() {
+    epfFetch('delivery', { cache: 'no-store' })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
+        .then(delivery => {
+            const status = document.getElementById('deliveryStatus');
+            const button = document.getElementById('cancelDeliveryButton');
+            if (!delivery.active) {
+                status.textContent = 'No delivery is waiting for acknowledgement.';
+                button.disabled = true;
+                return;
+            }
+            status.textContent = `Pending: ${delivery.asset_id} from ${delivery.album}. Release it only when the frame was lost or replaced.`;
+            button.disabled = false;
+        })
+        .catch(() => {
+            document.getElementById('deliveryStatus').textContent = 'Could not load delivery status.';
+        });
+}
+
+function cancelDelivery() {
+    if (!window.confirm('Release the pending delivery? The frame will receive a different photo on its next request.')) return;
+    epfFetch('delivery/cancel', { method: 'POST' })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
+        .then(() => {
+            showNotification('Pending delivery released.');
+            loadDelivery();
+        })
+        .catch(() => showNotification('Could not release the pending delivery.'));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -582,6 +620,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadLog();
     loadNext();
     loadChannels();
+    loadDelivery();
 
     // Both previews are proxied from Immich, so a failure there is the
     // likely cause; say so rather than leaving a broken image.
@@ -632,7 +671,7 @@ function handleSubmit(event) {
     event.preventDefault();
 
     // Submit the form using fetch
-    fetch(window.location.href, {
+    epfFetch(window.location.href, {
         method: 'POST',
         body: new FormData(document.getElementById('settingsForm'))
     })

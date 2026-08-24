@@ -17,6 +17,9 @@ The project is still a work in progress. The OLED profile is the convenient
 development and networking test path; the EE04 profile is the target hardware
 path.
 
+For the current implementation state, security decisions, and recent fixes,
+see [`CHANGELOG.md`](CHANGELOG.md).
+
 ## System flow
 
 ```text
@@ -65,9 +68,19 @@ file beside it:
 
 ```env
 IMMICH_API_KEY=your-immich-api-key
+IMMICH_ALLOWED_ORIGINS=https://192.0.2.10
+IMMICH_ALLOWED_IPS=192.0.2.10
+EPF_ADMIN_PASSWORD_HASH=generated-werkzeug-password-hash
+EPF_DEVICE_TOKEN=a-long-random-bearer-token-for-this-frame
+EPF_SESSION_SECRET=a-long-random-session-secret
 TZ=Europe/Stockholm
 EPF_PORT=15001
 ```
+
+Use [`.env.example`](.env.example) as the complete template. `IMMICH_ALLOWED_ORIGINS`
+must be an IP-literal URL (not a hostname), and its address must also appear in
+`IMMICH_ALLOWED_IPS`. This avoids DNS-rebinding attacks against the Immich API key.
+Generate the password hash with the command shown in that template.
 
 Start the published image:
 
@@ -81,9 +94,18 @@ Open the settings page at:
 http://localhost:15001
 ```
 
+Compose deliberately binds this address to the Docker host's loopback interface.
+Put it behind an authenticated reverse proxy, or publish it through Tailscale,
+before a physical frame can reach it. Do not expose this service through router
+port forwarding or the public internet.
+
+If Nginx runs on another machine, set `EPF_BIND_ADDRESS` to the EPF host's one
+LAN address (for example `192.0.2.134`), then allow TCP `15001` only from the
+reverse-proxy host in the host firewall. Do not use `0.0.0.0` for this setting.
+
 In the settings page, configure:
 
-- **Immich Server URL** — for example `http://192.168.1.220:2283`
+- **Immich Server URL** — for example `http://192.0.2.220:2283`
 - **Album Name** — must match the Immich album name exactly, including case
 
 The Immich URL is the address of Immich from the Docker container. The ESP32
@@ -133,6 +155,30 @@ photos\   tracking data and history files
 Keep both mounts when deploying or updating the image. Recreating a container
 without them resets the settings and photo history.
 
+The service runs as UID `10001`. On Linux or a NAS, create the directories and
+grant that UID write access before starting Compose:
+
+```sh
+mkdir -p config photos
+chown -R 10001:10001 config photos
+```
+
+Startup checks both mounts and exits clearly if they are not writable.
+
+### Delivery protocol and recovery
+
+`GET /download` returns exactly 192,000 bytes of packed panel data with a
+delivery ID, SHA-256 checksum, and next-sleep value in response headers. The
+frame stages the whole payload in SPIFFS, verifies the checksum, updates the
+panel, then sends the delivery ID to `POST /ack`. Until that acknowledgement,
+retries receive the same payload; a lease expires after 24 hours so a lost or
+replaced frame cannot stop the album forever.
+
+If a frame is deliberately replaced before its lease expires, sign in to the
+administrator UI and use **Release pending delivery**. It calls the
+authenticated, CSRF-protected `/delivery/cancel` action. This deployment model supports one frame per EPF server/token;
+run a separate instance with separate secrets for each independent frame.
+
 ### Portainer
 
 For a Portainer deployment, create a Stack from `docker-compose.yml` or from a
@@ -157,6 +203,18 @@ as its source directory.
 
 The default PlatformIO environment is `prototype_oled`.
 
+### Provisioning access
+
+Firmware settings are available only through the short-lived captive portal,
+not through a station-mode management web server. On the EE04, hold the setup
+button during boot; on the buttonless OLED prototype, the portal opens only
+when no Wi-Fi network has ever been saved and closes after five minutes. The
+EE04 renders the setup SSID and its per-device password on the panel before
+opening the portal. The password is exactly 12 characters: lowercase `epf-`
+followed by eight uppercase letters/digits. It is case-sensitive and persists
+until flash is erased. Factory reset rotates it along with the saved network
+credentials.
+
 ### OLED wiring
 
 | OLED | ESP32 |
@@ -171,16 +229,18 @@ remains visible while testing.
 
 ### Configure the server URL
 
-For the OLED prototype, set the EPF server address in
+For the OLED prototype, set the HTTPS EPF server address in
 [`Arduino/config.h`](Arduino/config.h):
 
 ```cpp
-#define SERVER_BASE_URL "http://192.168.1.134:15001"
+#define SERVER_BASE_URL "https://frame.example.net"
 ```
 
-Use the LAN IP address of the Windows computer or NAS running EPF and the
-published EPF port. Do not use `localhost`: from the ESP32, `localhost` means
-the ESP32 itself.
+Use the HTTPS reverse-proxy address that resolves to the EPF server. Do not use
+`localhost`: from the ESP32, `localhost` means the ESP32 itself. Normal local
+profiles reject HTTP, even on a LAN. Add the issuing CA certificate to the
+ignored `Arduino/device_secrets.h` using the exact form in
+`Arduino/device_secrets.h.example`.
 
 The firmware also stores the server URL in ESP32 Preferences. A saved value
 overrides the value in `config.h`; the serial monitor prints the actual value
@@ -192,15 +252,14 @@ Tailscale is a compile-time option selected by the PlatformIO environment. This
 keeps a local frame completely offline from Tailscale instead of merely having
 it ignore a setting at runtime.
 
-The XIAO local profile uses ordinary HTTP to the LAN EPF server. The parents'
-profile also uses HTTP at the application layer because the Tailscale tunnel
-provides the encryption; the OLED-only local profile retains its existing
-optional HTTPS support.
+Normal local profiles use HTTPS and validate the server certificate. The
+Tailscale profiles may use HTTP at the application layer because the Tailscale
+tunnel provides encryption and access control.
 
 For a local XIAO frame:
 
 ```powershell
-pio run -e ee04_epaper -t upload
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e ee04_epaper -t upload
 ```
 
 For the parents' XIAO frame, use `ee04_epaper_tailscale` and configure the auth key as
@@ -208,7 +267,7 @@ described below. The current 4 MB OLED board also has an experimental
 Tailscale-enabled environment:
 
 ```powershell
-pio run -e prototype_oled_tailscale -t upload
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e prototype_oled_tailscale -t upload
 ```
 
 The normal `prototype_oled` environment remains the local, non-Tailscale test
@@ -256,27 +315,27 @@ required.
 From the EPF repository root:
 
 ```powershell
-pio run -e prototype_oled
-pio run -e prototype_oled -t upload
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e prototype_oled
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e prototype_oled -t upload
 ```
 
 Open the serial monitor at 115200 baud. A successful OLED test looks like:
 
 ```text
 WiFi Connected. Downloading image
-nas url: http://192.168.1.134:15001
+nas url: https://frame.example.net
 Image data received
 [status] Image received | photo-name.jpg
 ```
 
-The firmware then requests `/sleep`. The OLED profile does not enter deep
-sleep; the e-paper profile does.
+The response includes the next sleep duration; the OLED profile does not enter
+deep sleep, while the e-paper profile does.
 
 For the physical target:
 
 ```powershell
-pio run -e ee04_epaper_tailscale
-pio run -e ee04_epaper_tailscale -t upload
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e ee04_epaper_tailscale
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e ee04_epaper_tailscale -t upload
 ```
 
 The EE04 display wiring is defined by the board profile. Verify the 50-pin
@@ -322,7 +381,7 @@ ESP32 flash before uploading.
 The Immich URL must include the scheme and port, for example:
 
 ```text
-http://192.168.1.220:2283
+http://192.0.2.220:2283
 ```
 
 Do not append `/api`; EPF adds the API paths itself. Check the container logs:
