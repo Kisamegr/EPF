@@ -240,6 +240,11 @@ private:
       delay(5);
     }
     batteryVoltage = (plusV / 10) * 2;
+#elif defined(EPF_PROTOTYPE_FAKE_BATTERY_MV)
+    // The USB-powered OLED prototype has no battery ADC. Report a stable
+    // representative voltage so the server-side battery indicator can be
+    // exercised during integration testing (3808 mV maps to 42%).
+    batteryVoltage = EPF_PROTOTYPE_FAKE_BATTERY_MV;
 #endif
     http.addHeader("batteryCap", String(batteryVoltage));
     if (String(EPF_DEVICE_TOKEN).length() < 32)
