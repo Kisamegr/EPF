@@ -183,9 +183,12 @@ private:
       return false;
     }
 #endif
-    WiFiClient *basicClient = nullptr;
+    // Declare transport clients before HTTPClient so their destructors run
+    // after HTTPClient's destructor. HTTPClient keeps a client reference and
+    // can otherwise touch a dangling object during automatic cleanup.
+    WiFiClient basicClient;
 #if EPF_ENABLE_SECURE_HTTP
-    WiFiClientSecure *secureClient = nullptr;
+    WiFiClientSecure secureClient;
 #endif
     HTTPClient http;
     http.setTimeout(HTTP_TIMEOUT);
@@ -199,18 +202,15 @@ private:
     if (isHttps)
     {
 #if EPF_ENABLE_SECURE_HTTP
-      secureClient = new WiFiClientSecure;
 #ifdef EPF_HAS_SERVER_CA_CERT
-      secureClient->setCACert(EpfServerCaCert);
+      secureClient.setCACert(EpfServerCaCert);
 #else
       Serial.println(F("HTTPS certificate is not configured"));
-      delete secureClient;
       return false;
 #endif
-      if (!http.begin(*secureClient, imageUrl + downloadPath))
+      if (!http.begin(secureClient, imageUrl + downloadPath))
       {
         Serial.println("Failed to initialize HTTPS connection");
-        delete secureClient;
         return false;
       }
 #endif
@@ -221,11 +221,9 @@ private:
       showStatus("HTTPS required", "or use Tailscale");
       return false;
 #endif
-      basicClient = new WiFiClient;
-      if (!http.begin(*basicClient, imageUrl + downloadPath))
+      if (!http.begin(basicClient, imageUrl + downloadPath))
       {
         Serial.println("Failed to initialize HTTP connection");
-        delete basicClient;
         return false;
       }
     }
@@ -269,11 +267,12 @@ private:
           if (success)
           {
             requestedSleepSeconds = http.header("X-Sleep-Seconds").toInt();
-            HTTPClient ack;
             WiFiClient ackBasic;
 #if EPF_ENABLE_SECURE_HTTP
             WiFiClientSecure ackSecure;
 #endif
+            // Keep the client objects alive until ack's destructor runs.
+            HTTPClient ack;
             bool ackReady = false;
             if (isHttps)
             {
@@ -313,12 +312,6 @@ private:
 
     http.end();
     delay(10);
-#if EPF_ENABLE_SECURE_HTTP
-    if (secureClient)
-      delete secureClient;
-#endif
-    if (basicClient)
-      delete basicClient;
 
     showStatus(success ? "Image received" : "Image fetch failed",
                success
