@@ -2,6 +2,15 @@
 #include <WiFi.h>
 #include "config.h"
 
+namespace
+{
+bool isValidAdminPassword(const String &password)
+{
+    return password.length() >= EPF_ADMIN_PASSWORD_MIN_LENGTH &&
+           password.length() <= EPF_ADMIN_PASSWORD_MAX_LENGTH;
+}
+}
+
 void WifiCaptive::setUpDNSServer(DNSServer &dnsServer, const IPAddress &localIP)
 {
     dnsServer.setTTL(3600);
@@ -61,13 +70,21 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
                              {
 		String json = "[";
 		int n = WiFi.scanComplete();
-		if (n == WIFI_SCAN_FAILED) {
-			WiFi.scanNetworks(true);
+		if (n == WIFI_SCAN_RUNNING) {
 			return request->send(202);
-		} else if(n == WIFI_SCAN_RUNNING){
-			return request->send(202);
-		} else {
-			// Data structure to store the highest RSSI for each SSID
+		} else if (n == WIFI_SCAN_FAILED || n == 0) {
+            // An async scan can report zero results while the radio is still
+            // settling after the AP is started. Retry synchronously once so
+            // the portal does not render an empty network selector.
+            WiFi.scanDelete();
+            n = WiFi.scanNetworks(false);
+            if (n < 0) {
+				WiFi.scanNetworks(true);
+				return request->send(202);
+			}
+		}
+
+		// Data structure to store the highest RSSI for each SSID
             // Warning: DO NOT USE true on this function in an async context! 
 			std::vector<Network> uniqueNetworks = getScannedUniqueNetworks(false);
             std::vector<Network> combinedNetworks = combineNetworks(uniqueNetworks, _savedWifis);
@@ -103,7 +120,6 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
 			if (WiFi.scanComplete() == -2){
 				WiFi.scanNetworks(true);
 			}
-		}
 		json += "]";
 		request->send(200, "application/json", json);
 		json = String(); });
@@ -113,7 +129,8 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
 		JsonObject data = json.as<JsonObject>();
 		String ssid = data["ssid"];
         String pswd = data["pswd"];
-        String api_server = data["server"];
+		String api_server = data["server"];
+        api_server.trim();
 
         if (api_server.length() > 0 && !DeviceSettingsServer::isValidServerUrl(api_server))
         {
@@ -126,10 +143,10 @@ void WifiCaptive::setUpWebserver(AsyncWebServer &server, const IPAddress &localI
         Preferences settings;
         settings.begin("data", false);
         String admin_password = data["admin_password"] | "";
-        if (admin_password.length() > 0 && admin_password != "********" && (admin_password.length() < 12 || admin_password.length() > 95))
+        if (admin_password.length() > 0 && admin_password != "********" && !isValidAdminPassword(admin_password))
         {
             settings.end();
-            request->send(400, "application/json", "{\"error\":\"administrator password must be 12 to 95 characters\"}");
+            request->send(400, "application/json", "{\"error\":\"administrator password must be 8 to 16 characters\"}");
             return;
         }
         if (admin_password.length() > 0 && admin_password != "********")

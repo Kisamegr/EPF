@@ -1,6 +1,7 @@
 #include "DeviceSettingsServer.h"
 
 #include <ArduinoJson.h>
+#include <ctype.h>
 #include <ESP.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -21,6 +22,12 @@ String wifiPasswordKey(uint8_t index) { return "wifi_" + String(index) + "_pswd"
 bool isSecretPlaceholder(const String &value)
 {
     return value.length() == 0 || value == "********" || value == "masked";
+}
+
+bool isValidAdminPassword(const String &password)
+{
+    return password.length() >= EPF_ADMIN_PASSWORD_MIN_LENGTH &&
+           password.length() <= EPF_ADMIN_PASSWORD_MAX_LENGTH;
 }
 }
 
@@ -106,22 +113,41 @@ bool DeviceSettingsServer::hasAdminPassword() const
 
 bool DeviceSettingsServer::isValidServerUrl(const String &url)
 {
-    if (url.length() < 10 || url.length() > 160)
+    String normalized = url;
+    normalized.trim();
+    if (normalized.length() < 10 || normalized.length() > 160)
         return false;
-    if (!(url.startsWith("http://") || url.startsWith("https://")))
+    if (!(normalized.startsWith("http://") || normalized.startsWith("https://")))
         return false;
-    if (url.indexOf('@') >= 0 || url.indexOf('?') >= 0 || url.indexOf('#') >= 0)
+    if (normalized.indexOf('@') >= 0 || normalized.indexOf('?') >= 0 || normalized.indexOf('#') >= 0)
         return false;
 
-    int schemeEnd = url.indexOf("://");
+    int schemeEnd = normalized.indexOf("://");
     int hostStart = schemeEnd + 3;
-    int pathStart = url.indexOf('/', hostStart);
-    String authority = pathStart >= 0 ? url.substring(hostStart, pathStart) : url.substring(hostStart);
+    int pathStart = normalized.indexOf('/', hostStart);
+    String authority = pathStart >= 0 ? normalized.substring(hostStart, pathStart) : normalized.substring(hostStart);
     if (authority.length() == 0 || authority.length() > 100)
         return false;
 
+    for (size_t i = 0; i < authority.length(); ++i)
+    {
+        if (isspace(static_cast<unsigned char>(authority[i])))
+            return false;
+    }
+
     int colon = authority.lastIndexOf(':');
-    String host = colon > 0 ? authority.substring(0, colon) : authority;
+    int bracketEnd = authority.indexOf(']');
+
+    String host;
+    if (bracketEnd >= 0)
+    {
+        host = authority.substring(0, bracketEnd + 1);
+    }
+    else
+    {
+        host = colon > 0 ? authority.substring(0, colon) : authority;
+    }
+
     if (host.length() == 0)
         return false;
     for (size_t i = 0; i < host.length(); ++i)
@@ -129,14 +155,22 @@ bool DeviceSettingsServer::isValidServerUrl(const String &url)
         char c = host[i];
         if (!(isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == ':' || c == '[' || c == ']'))
             return false;
+        if (c == '.' && (i == 0 || i + 1 == host.length() || host[i - 1] == '.'))
+            return false;
     }
-    // The EPF application endpoint is intentionally fixed to port 15001.
-    // Restricting this here keeps the device from being pointed at arbitrary
-    // services on a trusted LAN or tailnet.
-    if (colon <= 0)
-        return false;
-    String port = authority.substring(colon + 1);
-    return port == "15001";
+
+    if (colon > (bracketEnd >= 0 ? bracketEnd : -1))
+    {
+        String port = authority.substring(colon + 1);
+        if (port != "80" && port != "443" && port != "15001")
+            return false;
+        for (size_t i = 0; i < port.length(); ++i)
+        {
+            if (!isdigit(static_cast<unsigned char>(port[i])))
+                return false;
+        }
+    }
+    return true;
 }
 
 void DeviceSettingsServer::saveWifiCredentials(const String &ssid, const String &password)
@@ -256,9 +290,9 @@ void DeviceSettingsServer::installRoutes()
         }
 
         String password = json["admin_password"] | "";
-        if (password.length() < 12 || password.length() > 95)
+        if (!isValidAdminPassword(password))
         {
-            request->send(400, "application/json", "{\"error\":\"admin password must be 8 to 95 characters\"}");
+            request->send(400, "application/json", "{\"error\":\"admin password must be 8 to 16 characters\"}");
             return;
         }
 
@@ -289,6 +323,7 @@ void DeviceSettingsServer::installRoutes()
         preferences.begin(DATA_NAMESPACE, false);
 
         String url = data["server_url"] | "";
+        url.trim();
         if (url.length() > 0 && !isValidServerUrl(url))
         {
             preferences.end();
@@ -324,7 +359,15 @@ void DeviceSettingsServer::installRoutes()
 
         String adminPassword = data["admin_password"] | "";
         if (!isSecretPlaceholder(adminPassword))
+        {
+            if (!isValidAdminPassword(adminPassword))
+            {
+                preferences.end();
+                request->send(400, "application/json", "{\"error\":\"admin password must be 8 to 16 characters\"}");
+                return;
+            }
             preferences.putString(PREFERENCES_ADMIN_PASSWORD, adminPassword);
+        }
 
         String tailscaleKey = data["tailscale_auth_key"] | "";
         if (!isSecretPlaceholder(tailscaleKey))

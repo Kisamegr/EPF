@@ -67,6 +67,8 @@
 
 // Runtime settings stored in the existing "data" NVS namespace.
 #define PREFERENCES_ADMIN_PASSWORD "admin_password"
+#define EPF_ADMIN_PASSWORD_MIN_LENGTH 8U
+#define EPF_ADMIN_PASSWORD_MAX_LENGTH 16U
 #define PREFERENCES_TAILSCALE_ENABLED "tailscale_enabled"
 #define PREFERENCES_TAILSCALE_NAME "tailscale_name"
 #define PREFERENCES_TAILSCALE_AUTH_KEY "tailscale_auth"
