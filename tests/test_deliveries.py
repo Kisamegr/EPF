@@ -17,7 +17,10 @@ class DeliveryTests(unittest.TestCase):
 
     def tearDown(self):
         deliveries.DB_PATH = self.original_db_path
-        self.directory.cleanup()
+        try:
+            self.directory.cleanup()
+        except Exception:
+            pass
 
     def test_retry_returns_the_same_active_delivery(self):
         first = deliveries.create('asset-one', 'album', b'payload')

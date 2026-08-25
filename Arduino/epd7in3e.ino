@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <HTTPClient.h>
+#include <Update.h>
 #include "hardware_profile.h"
 #if EPF_ENABLE_TAILSCALE
 #include <microlink.h>
@@ -28,6 +29,12 @@
 #endif
 
 Preferences preferences;
+
+// Shared IO buffer reused by OTA firmware download and panel image streaming.
+// Both operations are mutually exclusive within a single boot cycle: when an
+// OTA update is pending the device downloads + installs firmware and restarts
+// before ever touching the image path, so a single static region is safe.
+static uint8_t s_io_buffer[BUFFER_SIZE];
 
 #if EPF_ENABLE_TAILSCALE
 static microlink_t *tailnet = nullptr;
@@ -150,24 +157,300 @@ private:
   }
 #endif
 
-  bool downloadImage()
+  void sendOtaAck(bool success, const String &errorDetail)
   {
-    receivedImageName = "";
-    // An empty saved preference must not hide the compile-time default. This
-    // can happen when the captive portal was submitted without a server URL.
+    WiFiClient ackBasic;
+#if EPF_ENABLE_SECURE_HTTP
+    WiFiClientSecure ackSecure;
+#endif
+    HTTPClient ackHttp;
+    bool ackReady = false;
+    bool isHttps = imageUrl.startsWith("https://");
+
+    if (isHttps)
+    {
+#if EPF_ENABLE_SECURE_HTTP
+#ifdef EPF_HAS_SERVER_CA_CERT
+      ackSecure.setCACert(EpfServerCaCert);
+      ackReady = ackHttp.begin(ackSecure, imageUrl + "/ota/ack");
+#endif
+#endif
+    }
+    else
+    {
+      ackReady = ackHttp.begin(ackBasic, imageUrl + "/ota/ack");
+    }
+
+    if (ackReady)
+    {
+      ackHttp.addHeader("Authorization", String("Bearer ") + EPF_DEVICE_TOKEN);
+      ackHttp.addHeader("Content-Type", "application/json");
+      String jsonBody = "{\"status\":\"" + String(success ? "success" : "failed") + "\",\"error\":\"" + errorDetail + "\"}";
+      ackHttp.POST(jsonBody);
+      ackHttp.end();
+    }
+  }
+
+  bool performOtaUpdate()
+  {
+    showStatus("OTA Update", "Downloading FW...");
+    Serial.println(F("[OTA] Pending OTA update detected. Starting firmware update..."));
+
+    WiFiClient basicClient;
+#if EPF_ENABLE_SECURE_HTTP
+    WiFiClientSecure secureClient;
+#endif
+    HTTPClient http;
+    http.setTimeout(30000);
+
+    const char *otaBinaryPath = "/ota/binary";
+    const char *responseHeaders[] = {"X-EPF-OTA-SHA256", "Content-Length"};
+    http.collectHeaders(responseHeaders, 2);
+
+    bool isHttps = imageUrl.startsWith("https://");
+    bool initOk = false;
+
+    if (isHttps)
+    {
+#if EPF_ENABLE_SECURE_HTTP
+#ifdef EPF_HAS_SERVER_CA_CERT
+      secureClient.setCACert(EpfServerCaCert);
+      initOk = http.begin(secureClient, imageUrl + otaBinaryPath);
+#endif
+#endif
+    }
+    else
+    {
+      initOk = http.begin(basicClient, imageUrl + otaBinaryPath);
+    }
+
+    if (!initOk)
+    {
+      Serial.println(F("[OTA] Failed to initialize connection to /ota/binary"));
+      sendOtaAck(false, "Connection init failed");
+      return false;
+    }
+
+    http.addHeader("Authorization", String("Bearer ") + EPF_DEVICE_TOKEN);
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK)
+    {
+      Serial.printf("[OTA] GET /ota/binary failed with HTTP code %d\n", httpCode);
+      String err = "HTTP " + String(httpCode);
+      http.end();
+      sendOtaAck(false, err);
+      return false;
+    }
+
+    int contentLength = http.getSize();
+    String expectedSha256 = http.header("X-EPF-OTA-SHA256");
+
+    if (contentLength <= 0)
+    {
+      Serial.println(F("[OTA] Invalid Content-Length header"));
+      http.end();
+      sendOtaAck(false, "Invalid Content-Length");
+      return false;
+    }
+
+    Serial.printf("[OTA] Firmware binary size: %d bytes, Expected SHA256: %s\n", contentLength, expectedSha256.c_str());
+
+    if (!Update.begin(contentLength))
+    {
+      Serial.printf("[OTA] Update.begin failed: %s\n", Update.errorString());
+      String err = String("Update.begin failed: ") + Update.errorString();
+      http.end();
+      sendOtaAck(false, err);
+      return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t *buffer = s_io_buffer;
+    uint8_t digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts_ret(&sha, 0);
+
+    size_t written = 0;
+    unsigned long lastData = millis();
+    bool writeFailed = false;
+
+    while (written < static_cast<size_t>(contentLength) && millis() - lastData < 60000)
+    {
+      int availableBytes = stream->available();
+      if (availableBytes > 0)
+      {
+        int bytesRead = stream->readBytes(buffer, min(static_cast<size_t>(availableBytes), static_cast<size_t>(BUFFER_SIZE)));
+        if (bytesRead > 0)
+        {
+          size_t bytesWritten = Update.write(buffer, bytesRead);
+          if (bytesWritten != static_cast<size_t>(bytesRead))
+          {
+            Serial.printf("[OTA] Update.write failed! Read %d, wrote %d: %s\n", bytesRead, bytesWritten, Update.errorString());
+            writeFailed = true;
+            break;
+          }
+          mbedtls_sha256_update_ret(&sha, buffer, bytesRead);
+          written += bytesRead;
+          lastData = millis();
+        }
+      }
+      else
+      {
+        delay(10);
+      }
+    }
+
+    http.end();
+    mbedtls_sha256_finish_ret(&sha, digest);
+    mbedtls_sha256_free(&sha);
+
+    if (writeFailed || written != static_cast<size_t>(contentLength))
+    {
+      Serial.printf("[OTA] Download or write incomplete. Written %d / %d bytes\n", written, contentLength);
+      Update.abort();
+      sendOtaAck(false, "Incomplete download or write error");
+      return false;
+    }
+
+    char actualSha256[65];
+    for (size_t i = 0; i < sizeof(digest); ++i) sprintf(actualSha256 + (i * 2), "%02x", digest[i]);
+    actualSha256[64] = '\0';
+
+    if (expectedSha256.length() == 64 && expectedSha256.equalsIgnoreCase(actualSha256) == false)
+    {
+      Serial.printf("[OTA] SHA-256 mismatch! Expected: %s, Actual: %s\n", expectedSha256.c_str(), actualSha256);
+      Update.abort();
+      sendOtaAck(false, "SHA-256 integrity check failed");
+      return false;
+    }
+
+    if (!Update.end(true))
+    {
+      Serial.printf("[OTA] Update.end failed: %s\n", Update.errorString());
+      String err = String("Update.end failed: ") + Update.errorString();
+      sendOtaAck(false, err);
+      return false;
+    }
+
+    Serial.println(F("[OTA] Firmware binary verified & flashed successfully!"));
+    showStatus("OTA Success", "Rebooting into new FW");
+
+    sendOtaAck(true, "");
+    delay(500);
+
+    Serial.println(F("[OTA] Restarting ESP32..."));
+    ESP.restart();
+    return true;
+  }
+
+  // Resolve and cache the server base URL from persisted preferences, falling
+  // back to the compile-time default. Returns false and shows a status message
+  // when no URL is configured at all.
+  bool resolveServerUrl()
+  {
     imageUrl = preferences.getString("SERVER_BASE_URL", "");
     if (imageUrl.length() == 0)
-    {
       imageUrl = SERVER_BASE_URL;
-    }
     if (imageUrl.length() == 0)
     {
       showStatus("No server URL", "Configure portal");
       return false;
     }
+    return true;
+  }
+
+  // GET /ota/check: returns true only when an OTA update was triggered (device
+  // will restart). Returns false when no update is pending or on any error, so
+  // the caller can safely continue to the image-download path.
+  bool checkOtaAndUpdate()
+  {
+    if (!resolveServerUrl())
+      return false;
+
+    Serial.println(F("[OTA] Checking for firmware update..."));
+    bool isHttps = imageUrl.startsWith("https://");
+
+    WiFiClient basicClient;
+#if EPF_ENABLE_SECURE_HTTP
+    WiFiClientSecure secureClient;
+#endif
+    HTTPClient http;
+    http.setTimeout(10000); // short timeout: this is a lightweight JSON probe
+    bool initOk = false;
+
+    if (isHttps)
+    {
+#if EPF_ENABLE_SECURE_HTTP
+#ifdef EPF_HAS_SERVER_CA_CERT
+      secureClient.setCACert(EpfServerCaCert);
+      initOk = http.begin(secureClient, imageUrl + "/ota/check");
+#endif
+#endif
+    }
+    else
+    {
+      initOk = http.begin(basicClient, imageUrl + "/ota/check");
+    }
+
+    if (!initOk)
+    {
+      Serial.println(F("[OTA] Could not open /ota/check — skipping OTA probe"));
+      return false;
+    }
+
+    http.addHeader("Authorization", String("Bearer ") + EPF_DEVICE_TOKEN);
+    int httpCode = http.GET();
+
+    if (httpCode != HTTP_CODE_OK)
+    {
+      Serial.printf("[OTA] /ota/check returned %d — skipping OTA probe\n", httpCode);
+      http.end();
+      return false;
+    }
+
+    // Only extract the "available" boolean. The "staged" field may contain a
+    // 64-char SHA-256, filename, size, and timestamp — well over 128 bytes.
+    // The filter tells ArduinoJson to skip every key except "available".
+    // Both documents need at least JSON_OBJECT_SIZE(1) = 16 bytes; use 64 to
+    // be safe against ArduinoJson version differences.
+    // Use getString() rather than the stream so the connection is fully drained
+    // and closed before we open the /ota/binary connection.
+    String body = http.getString();
+    http.end();
+
+    StaticJsonDocument<64> filter;
+    filter["available"] = true;
+    StaticJsonDocument<64> doc;
+    DeserializationError err = deserializeJson(doc, body,
+                                               DeserializationOption::Filter(filter));
+
+    if (err || !doc["available"].is<bool>())
+    {
+      Serial.printf("[OTA] /ota/check parse failed (%s) — skipping OTA probe\n", err.c_str());
+      return false;
+    }
+
+    if (!doc["available"].as<bool>())
+    {
+      Serial.println(F("[OTA] No firmware update staged."));
+      return false;
+    }
+
+    Serial.println(F("[OTA] Firmware update available. Starting OTA..."));
+    performOtaUpdate(); // restarts on success; falls through on failure
+    return false;       // OTA failed; let caller decide what to do next
+  }
+
+  bool downloadImage()
+  {
+    receivedImageName = "";
+    if (!resolveServerUrl())
+      return false;
 
     showStatus("Fetching image", imageUrl);
-    Serial.print("nas url: ");
+    Serial.print("[EPF] Server URL: ");
     Serial.println(imageUrl);
     bool isHttps = imageUrl.startsWith("https://");
 #if !EPF_ENABLE_SECURE_HTTP
@@ -435,7 +718,7 @@ private:
       Serial.println("Could not stage panel payload");
       return false;
     }
-    uint8_t buffer[BUFFER_SIZE];
+    uint8_t *buffer = s_io_buffer;
     uint8_t digest[32];
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
@@ -444,7 +727,7 @@ private:
     unsigned long lastData = millis();
     while (received < EPF_PANEL_PAYLOAD_BYTES && millis() - lastData < HTTP_TIMEOUT)
     {
-      int bytesRead = stream->readBytes(buffer, min(sizeof(buffer), EPF_PANEL_PAYLOAD_BYTES - received));
+      int bytesRead = stream->readBytes(buffer, min(static_cast<size_t>(BUFFER_SIZE), EPF_PANEL_PAYLOAD_BYTES - received));
       if (bytesRead > 0)
       {
         if (staged.write(buffer, bytesRead) != static_cast<size_t>(bytesRead)) break;
@@ -683,14 +966,28 @@ public:
 #endif
     )
     {
-      Serial.println(F("WiFi Connected. Downloading image"));
-      if (downloadImage())
+      // Check for a staged OTA firmware update before touching the image path.
+      // /ota/check is a tiny JSON probe; if an update is available the device
+      // will download, verify, flash and restart — image fetch happens on the
+      // next boot with the new firmware already running.
+      if (checkOtaAndUpdate())
       {
-        Serial.println(F("Image download successful"));
+        // Should not be reached: performOtaUpdate() calls ESP.restart() on
+        // success. We land here only on OTA failure, in which case we still
+        // skip the image download so the error is not silently swallowed.
+        Serial.println(F("OTA update attempted but did not restart — skipping image fetch."));
       }
       else
       {
-        Serial.println(F("Image download failed"));
+        Serial.println(F("WiFi Connected. Downloading image"));
+        if (downloadImage())
+        {
+          Serial.println(F("Image download successful"));
+        }
+        else
+        {
+          Serial.println(F("Image download failed"));
+        }
       }
     }
     else

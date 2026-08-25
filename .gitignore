@@ -11,3 +11,6 @@ sdkconfig.*
 pio-build.log
 pio-test-*.log
 build/
+tests/__pycache__/
+epf/__pycache__/
+__pycache__/

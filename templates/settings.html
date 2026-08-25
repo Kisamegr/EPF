@@ -433,6 +433,71 @@
             </button>
         </div>
 
+        <div class="card" id="otaCard">
+            <div class="card-head">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                    stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                <h2 class="card-title" data-i18n="card.ota">Firmware Update (OTA)</h2>
+            </div>
+
+            <!-- Staged Firmware Info Section -->
+            <div class="ota-section" id="otaStagedSection">
+                <label data-i18n="ota.stagedLabel">Staged Firmware:</label>
+                <div class="ota-staged-box" id="otaStagedBox">
+                    <div class="ota-staged-none" id="otaStagedNone">
+                        <span data-i18n="ota.noneStaged">No firmware update staged.</span>
+                    </div>
+                    <div class="ota-staged-info" id="otaStagedInfo" hidden>
+                        <div class="ota-meta-row">
+                            <span class="ota-meta-filename" id="otaFilename"></span>
+                            <span class="ota-meta-size" id="otaSize"></span>
+                        </div>
+                        <div class="ota-meta-row ota-hash-row">
+                            <span class="ota-meta-label" data-i18n="ota.hashLabel">SHA-256:</span>
+                            <code class="ota-hash-val" id="otaSha256" title="Click to copy"></code>
+                        </div>
+                        <div class="ota-meta-row">
+                            <span class="ota-meta-time" id="otaUploadedAt"></span>
+                        </div>
+                        <button type="button" class="reset-btn ota-cancel-btn" id="otaCancelBtn" onclick="cancelOtaFirmware()" data-i18n="ota.cancel">
+                            Cancel Staged Firmware
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Upload Section -->
+            <div class="form-group ota-upload-group">
+                <label for="otaFileSelect" data-i18n="ota.uploadLabel">Upload New Firmware (.bin):</label>
+                <div class="ota-upload-row">
+                    <input type="file" id="otaFileSelect" accept=".bin" class="ota-file-input">
+                    <button type="button" class="reset-btn ota-upload-btn" id="otaUploadBtn" onclick="uploadOtaFirmware()" data-i18n="ota.btnUpload">
+                        Upload & Stage
+                    </button>
+                </div>
+                <div class="hint" data-i18n="hint.otaUpload">Select an ESP32 firmware binary compiled in PlatformIO or Arduino IDE (.bin).</div>
+                <div class="ota-progress-bar" id="otaProgressBar" hidden>
+                    <div class="ota-progress-fill" id="otaProgressFill"></div>
+                </div>
+            </div>
+
+            <!-- Last Update Result Section -->
+            <div class="ota-section" id="otaResultSection">
+                <label data-i18n="ota.lastResultLabel">Last Device Update Result:</label>
+                <div class="ota-result-box" id="otaResultBox">
+                    <span class="ota-result-chip" id="otaResultChip" data-state="none">
+                        <span class="dot"></span>
+                        <span id="otaResultText" data-i18n="ota.resultNone">No update recorded</span>
+                    </span>
+                    <span class="ota-result-detail" id="otaResultDetail"></span>
+                </div>
+            </div>
+        </div>
+
         <div class="card log-card">
             <div class="card-head">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"

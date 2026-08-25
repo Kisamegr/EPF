@@ -14,6 +14,7 @@ tracking_file = os.path.join(config.photodir, 'tracking.txt')
 _lock = threading.RLock()
 
 if not os.path.exists(tracking_file):
+    os.makedirs(os.path.dirname(tracking_file) or '.', exist_ok=True)
     open(tracking_file, 'w').close()
 
 def _album():

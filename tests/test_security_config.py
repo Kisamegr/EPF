@@ -3,8 +3,8 @@ import os
 import tempfile
 import unittest
 
-os.environ.setdefault('IMMICH_ALLOWED_ORIGINS', 'https://192.0.2.10')
-os.environ.setdefault('IMMICH_ALLOWED_IPS', '192.0.2.10')
+os.environ['IMMICH_ALLOWED_ORIGINS'] = 'http://192.0.2.10,https://192.0.2.10'
+os.environ['IMMICH_ALLOWED_IPS'] = '192.0.2.10'
 
 from epf import config
 

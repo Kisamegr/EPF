@@ -12,7 +12,7 @@ from flask import current_app, jsonify, redirect, request, session, url_for
 from werkzeug.security import check_password_hash
 
 SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
-DEVICE_PATHS = {'/download', '/ack', '/sleep'}
+DEVICE_PATHS = {'/download', '/ack', '/sleep', '/ota/check', '/ota/binary', '/ota/ack'}
 PUBLIC_PATHS = {'/login', '/healthz'}
 _lock = threading.Lock()
 _requests = defaultdict(deque)
@@ -39,7 +39,7 @@ def csrf_token():
     return token
 
 def _accepts_json():
-    return request.path.startswith(('/notify/', '/log/', '/next', '/status', '/preview/'))
+    return request.path.startswith(('/notify/', '/log/', '/next', '/status', '/preview/', '/ota/'))
 
 def _fail_auth(status=401):
     if _accepts_json() or request.method != 'GET':

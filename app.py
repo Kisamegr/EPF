@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from flask import (Flask, jsonify, make_response, redirect, render_template, request, send_file,
                    session, url_for)
 from epf import (battery, config, credentials, eventlog, imaging, immich, notify,
-                 state, tracking)
+                 ota, state, tracking)
 from epf import deliveries, security
 
 app = Flask(__name__)
@@ -371,6 +371,80 @@ def upcoming_photo():
         'taken_at': immich.taken_at_text(asset),
     }))
 
+# -------------------------------------------------------------------- OTA update
+
+@app.route('/ota/status', methods=['GET'])
+def ota_status():
+    """Return staged firmware details and last update execution result."""
+    return _no_store(jsonify({
+        'staged': ota.get_staged_info(),
+        'last_result': ota.get_last_result()
+    }))
+
+@app.route('/ota/upload', methods=['POST'])
+def ota_upload():
+    """Upload a new .bin firmware binary file to stage an OTA update."""
+    uploaded_file = request.files.get('firmware') or request.files.get('file')
+    if not uploaded_file or not uploaded_file.filename:
+        return _no_store(jsonify({'error': 'no_file_uploaded'})), 400
+
+    if not uploaded_file.filename.lower().endswith('.bin'):
+        return _no_store(jsonify({'error': 'invalid_file_type', 'detail': 'File must be a .bin binary'})), 400
+
+    try:
+        meta = ota.stage_firmware(uploaded_file)
+        eventlog.record('ota_staged', filename=meta['filename'], sha256=meta['sha256'],
+                        size=meta['size'], ip=eventlog.client_ip())
+        return _no_store(jsonify({'staged': meta}))
+    except Exception as error:
+        eventlog.record('error', where='ota_upload', message=str(error), ip=eventlog.client_ip())
+        return _no_store(jsonify({'error': 'upload_failed', 'detail': str(error)})), 500
+
+@app.route('/ota/cancel', methods=['POST'])
+def ota_cancel():
+    """Cancel staged firmware update."""
+    cancelled = ota.cancel_staged()
+    if cancelled:
+        eventlog.record('ota_cancelled', ip=eventlog.client_ip())
+    return _no_store(jsonify({'cancelled': cancelled}))
+
+@app.route('/ota/check', methods=['GET'])
+def ota_check():
+    """Device endpoint to check if an OTA firmware update is staged."""
+    staged = ota.get_staged_info()
+    return jsonify({
+        'available': staged is not None,
+        'staged': staged
+    })
+
+@app.route('/ota/binary', methods=['GET'])
+def ota_binary():
+    """Device endpoint to stream the staged raw firmware binary."""
+    filepath = ota.get_binary_filepath()
+    info = ota.get_staged_info()
+    if not filepath or not info:
+        return jsonify({'error': 'no_staged_firmware'}), 404
+
+    response = make_response(send_file(filepath, mimetype='application/octet-stream',
+                                       as_attachment=True, download_name=info['filename']))
+    response.headers['Content-Length'] = str(info['size'])
+    response.headers['X-EPF-OTA-SHA256'] = info['sha256']
+    return response
+
+@app.route('/ota/ack', methods=['POST'])
+def ota_ack():
+    """Device endpoint to report the outcome of an OTA firmware update."""
+    data = request.get_json(silent=True) or request.form or {}
+    status_val = data.get('status') or request.headers.get('X-EPF-OTA-Status', 'failed')
+    error_val = data.get('error') or request.headers.get('X-EPF-OTA-Error', '')
+    mac = request.headers.get('X-Device-Mac', '')
+
+    if status_val not in {'success', 'failed'}:
+        status_val = 'failed'
+
+    res = ota.record_ack(status_val, error_detail=error_val, ip=eventlog.client_ip(), mac=mac)
+    return jsonify({'acknowledged': True, 'result': res})
+
 # ------------------------------------------------- the contract with the frame
 
 @app.route('/download', methods=['GET'])
@@ -431,6 +505,7 @@ def process_and_download():
         response.headers['X-Asset-Id'] = asset_id
         response.headers['X-Payload-SHA256'] = hashlib.sha256(payload).hexdigest()
         response.headers['X-Sleep-Seconds'] = str(_sleep_duration_seconds())
+        response.headers['X-EPF-OTA-Available'] = '1' if ota.get_staged_info() else '0'
         # The OLED emulator uses this header to show the original photo name
         # while still consuming the same prepared panel payload as the frame.
         photo_name = selected.get('originalFileName') or f"image_{asset_id}"
@@ -548,13 +623,13 @@ def initialize_application():
         return
     if not security.configured(app):
         raise RuntimeError('EPF_SESSION_SECRET, EPF_ADMIN_PASSWORD_HASH, and EPF_DEVICE_TOKEN are required')
-    config.ensure_file()
-    config.verify_storage()
-    loaded = config.read_file()
+    config.ensure_file(config.CONFIG_PATH)
+    config.verify_storage(config.CONFIG_PATH)
+    loaded = config.read_file(config.CONFIG_PATH)
     if loaded is None:
         raise RuntimeError('No valid configuration file is available')
     config.apply(loaded)
-    _observer = config.start_watcher(config.apply)
+    _observer = config.start_watcher(config.apply, config.CONFIG_PATH)
     eventlog.record('startup')
     _initialized = True
 

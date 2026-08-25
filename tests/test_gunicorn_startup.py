@@ -6,8 +6,8 @@ import types
 import unittest
 from werkzeug.security import generate_password_hash
 
-os.environ.setdefault('IMMICH_ALLOWED_ORIGINS', 'https://192.0.2.10')
-os.environ.setdefault('IMMICH_ALLOWED_IPS', '192.0.2.10')
+os.environ['IMMICH_ALLOWED_ORIGINS'] = 'http://192.0.2.10,https://192.0.2.10'
+os.environ['IMMICH_ALLOWED_IPS'] = '192.0.2.10'
 os.environ.setdefault('EPF_SESSION_SECRET', 'test-session-secret')
 os.environ.setdefault('EPF_DEVICE_TOKEN', 'x' * 48)
 os.environ.setdefault('EPF_ADMIN_PASSWORD_HASH', generate_password_hash('test-password'))
@@ -35,7 +35,13 @@ class GunicornStartupTests(unittest.TestCase):
             previous_extension = sys.modules.get('cpy')
             sys.modules['cpy'] = extension
             try:
-                import app
+                import importlib
+                if 'app' in sys.modules:
+                    import app
+                    app._initialized = False
+                    importlib.reload(app)
+                else:
+                    import app
                 self.assertEqual(app.config.immich()['album'], 'persisted-album')
                 app._stop_observer()
             finally:

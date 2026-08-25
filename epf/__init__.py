@@ -8,6 +8,8 @@ Server-side pieces of the e-paper photo frame.
   immich    talking to Immich, and choosing which photo comes next
   imaging   crop, enhance, dither and pack for the panel
   battery   voltage to percentage
+  ota       staging and managing ESP32 OTA firmware updates
 
 app.py holds the Flask app and the HTTP routes.
 """
+

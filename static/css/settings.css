@@ -1028,3 +1028,187 @@ footer {
         transition-duration: 0.01ms !important;
     }
 }
+
+/* ---------- OTA Firmware Update ---------- */
+.ota-section {
+    margin-bottom: 1.25rem;
+}
+
+.ota-staged-box {
+    margin-top: 0.45rem;
+    padding: 0.85rem 1rem;
+    background-color: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+}
+
+.ota-staged-none {
+    font-size: 0.88rem;
+    color: var(--ink-3);
+}
+
+.ota-staged-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.ota-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    font-size: 0.88rem;
+}
+
+.ota-meta-filename {
+    font-weight: 600;
+    color: var(--ink);
+    font-family: monospace;
+}
+
+.ota-meta-size {
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.ota-hash-row {
+    justify-content: flex-start;
+    gap: 0.5rem;
+}
+
+.ota-meta-label {
+    font-size: 0.8rem;
+    color: var(--ink-3);
+}
+
+.ota-hash-val {
+    font-size: 0.78rem;
+    padding: 0.15rem 0.4rem;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--accent);
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.ota-hash-val:hover {
+    border-color: var(--accent);
+}
+
+.ota-meta-time {
+    font-size: 0.8rem;
+    color: var(--ink-3);
+}
+
+.ota-cancel-btn {
+    margin-top: 0.4rem;
+    font-size: 0.82rem;
+    padding: 0.4rem 0.8rem;
+    align-self: flex-start;
+    color: var(--clay);
+    border-color: var(--clay);
+}
+
+.ota-cancel-btn:hover {
+    background-color: rgba(168, 80, 60, 0.1);
+}
+
+.ota-upload-group {
+    margin-bottom: 1.25rem;
+}
+
+.ota-upload-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.ota-file-input {
+    flex: 1;
+    min-width: 200px;
+    font-size: 0.88rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-2);
+    color: var(--ink);
+}
+
+.ota-upload-btn {
+    font-size: 0.88rem;
+    padding: 0.55rem 1.1rem;
+    white-space: nowrap;
+}
+
+.ota-progress-bar {
+    width: 100%;
+    height: 6px;
+    background-color: var(--line);
+    border-radius: 3px;
+    margin-top: 0.6rem;
+    overflow: hidden;
+}
+
+.ota-progress-fill {
+    height: 100%;
+    width: 0%;
+    background-color: var(--accent);
+    transition: width var(--transition);
+}
+
+.ota-result-box {
+    margin-top: 0.45rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.ota-result-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 0.25rem 0.65rem;
+    border-radius: 999px;
+    background-color: var(--surface-2);
+    border: 1px solid var(--line-strong);
+}
+
+.ota-result-chip .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--ink-3);
+}
+
+.ota-result-chip[data-state="ok"] {
+    color: var(--moss);
+    border-color: var(--moss);
+    background-color: rgba(111, 127, 69, 0.08);
+}
+
+.ota-result-chip[data-state="ok"] .dot {
+    background-color: var(--moss);
+}
+
+.ota-result-chip[data-state="error"] {
+    color: var(--clay);
+    border-color: var(--clay);
+    background-color: rgba(168, 80, 60, 0.08);
+}
+
+.ota-result-chip[data-state="error"] .dot {
+    background-color: var(--clay);
+}
+
+.ota-result-detail {
+    font-size: 0.82rem;
+    color: var(--ink-3);
+}
+

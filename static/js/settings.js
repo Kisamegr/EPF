@@ -94,6 +94,7 @@ function applyTranslations() {
     renderStatus();
     renderLog();
     renderChannels();
+    renderOtaStatus(lastOtaStatus);
 }
 
 /*
@@ -466,6 +467,9 @@ const LOG_EVENTS = {
     tracking_reset: 'event.trackingReset',
     error: 'event.error',
     startup: 'event.startup',
+    ota_staged: 'event.otaStaged',
+    ota_cancelled: 'event.otaCancelled',
+    ota_update_result: 'event.otaResult',
 };
 let logEntries = null;
 
@@ -501,6 +505,15 @@ function logDetail(entry) {
         }
     } else if (entry.event === 'tracking_reset' && entry.reason) {
         parts.push(entry.reason);
+    } else if (entry.event === 'ota_staged') {
+        if (entry.filename) parts.push(entry.filename);
+        if (entry.size) parts.push(formatFileSize(entry.size));
+        if (entry.ip) parts.push(entry.ip);
+    } else if (entry.event === 'ota_update_result') {
+        if (entry.status) parts.push(entry.status);
+        if (entry.error) parts.push(entry.error);
+        if (entry.mac) parts.push(entry.mac);
+        if (entry.ip) parts.push(entry.ip);
     } else if (entry.event === 'error' && entry.message) {
         parts.push(entry.message);
     }
@@ -621,6 +634,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadNext();
     loadChannels();
     loadDelivery();
+    loadOtaStatus();
 
     // Both previews are proxied from Immich, so a failure there is the
     // likely cause; say so rather than leaving a broken image.
@@ -685,4 +699,151 @@ function handleSubmit(event) {
         .catch(error => {
             showNotification(error.message);
         });
+}
+
+/*
+ * OTA Firmware updates
+ */
+let lastOtaStatus = null;
+
+function formatFileSize(bytes) {
+    if (!bytes) return '0 KB';
+    if (bytes >= 1048576) {
+        return (bytes / 1048576).toFixed(2) + ' MB';
+    }
+    return (bytes / 1024).toFixed(1) + ' KB';
+}
+
+function renderOtaStatus(data) {
+    lastOtaStatus = data || null;
+    const stagedNone = document.getElementById('otaStagedNone');
+    const stagedInfo = document.getElementById('otaStagedInfo');
+
+    if (data && data.staged) {
+        if (stagedNone) stagedNone.hidden = true;
+        if (stagedInfo) stagedInfo.hidden = false;
+
+        const filenameEl = document.getElementById('otaFilename');
+        const sizeEl = document.getElementById('otaSize');
+        const sha256El = document.getElementById('otaSha256');
+        const timeEl = document.getElementById('otaUploadedAt');
+
+        if (filenameEl) filenameEl.textContent = data.staged.filename || 'firmware.bin';
+        if (sizeEl) sizeEl.textContent = formatFileSize(data.staged.size || 0);
+        if (sha256El) {
+            sha256El.textContent = data.staged.sha256 || '';
+            sha256El.onclick = () => {
+                if (navigator.clipboard && data.staged.sha256) {
+                    navigator.clipboard.writeText(data.staged.sha256);
+                    showNotification(t('ota.copiedHash'));
+                }
+            };
+        }
+        if (timeEl) timeEl.textContent = data.staged.uploaded_at ? t('ota.stagedAt') + ' ' + data.staged.uploaded_at : '';
+    } else {
+        if (stagedNone) stagedNone.hidden = false;
+        if (stagedInfo) stagedInfo.hidden = true;
+    }
+
+    const chip = document.getElementById('otaResultChip');
+    const resultText = document.getElementById('otaResultText');
+    const detail = document.getElementById('otaResultDetail');
+
+    if (data && data.last_result) {
+        const res = data.last_result;
+        const isOk = res.status === 'success';
+        if (chip) chip.dataset.state = isOk ? 'ok' : 'error';
+        if (resultText) {
+            const key = isOk ? 'ota.resultSuccess' : 'ota.resultFailed';
+            resultText.dataset.i18n = key;
+            resultText.textContent = t(key);
+        }
+        if (detail) {
+            const parts = [];
+            if (res.ts) parts.push(res.ts);
+            if (res.error) parts.push(res.error);
+            if (res.ip) parts.push(res.ip);
+            detail.textContent = parts.join(' · ');
+        }
+    } else {
+        if (chip) chip.dataset.state = 'none';
+        if (resultText) {
+            resultText.dataset.i18n = 'ota.resultNone';
+            resultText.textContent = t('ota.resultNone');
+        }
+        if (detail) detail.textContent = '';
+    }
+}
+
+function loadOtaStatus() {
+    epfFetch('ota/status', { cache: 'no-store' })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
+        .then(data => renderOtaStatus(data))
+        .catch(() => renderOtaStatus(null));
+}
+
+function uploadOtaFirmware() {
+    const fileInput = document.getElementById('otaFileSelect');
+    const btn = document.getElementById('otaUploadBtn');
+    const progressBar = document.getElementById('otaProgressBar');
+    const progressFill = document.getElementById('otaProgressFill');
+
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+        showNotification(t('ota.selectFilePrompt'));
+        return;
+    }
+
+    const file = fileInput.files[0];
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+        showNotification(t('ota.invalidFilePrompt'));
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('firmware', file);
+
+    btn.disabled = true;
+    btn.textContent = t('ota.uploading');
+    if (progressBar) progressBar.hidden = false;
+    if (progressFill) progressFill.style.width = '20%';
+
+    epfFetch('ota/upload', {
+        method: 'POST',
+        body: formData
+    })
+        .then(response => response.json().then(payload => ({ ok: response.ok, payload })))
+        .then(({ ok, payload }) => {
+            btn.disabled = false;
+            btn.textContent = t('ota.btnUpload');
+            if (progressBar) progressBar.hidden = true;
+
+            if (!ok) {
+                const msg = payload.detail || payload.error || t('ota.uploadFailed');
+                showNotification(t('ota.uploadFailed') + ': ' + msg);
+                return;
+            }
+
+            showNotification(t('ota.uploadSuccess'));
+            fileInput.value = '';
+            loadOtaStatus();
+            loadLog();
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.textContent = t('ota.btnUpload');
+            if (progressBar) progressBar.hidden = true;
+            showNotification(t('ota.uploadFailed'));
+        });
+}
+
+function cancelOtaFirmware() {
+    if (!window.confirm(t('ota.confirmCancel'))) return;
+    epfFetch('ota/cancel', { method: 'POST' })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
+        .then(() => {
+            showNotification(t('ota.cancelSuccess'));
+            loadOtaStatus();
+            loadLog();
+        })
+        .catch(() => showNotification(t('ota.cancelFailed')));
 }

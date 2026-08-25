@@ -13,7 +13,30 @@ import numpy as np
 import rawpy
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 from pillow_heif import register_heif_opener
-from cpy import convert_image, load_scaled
+try:
+    from cpy import convert_image, load_scaled
+except ImportError:
+    def load_scaled(image, rotation, display_mode, target_width=800, target_height=480):
+        if rotation:
+            image = image.rotate(rotation, expand=True)
+        img_w, img_h = image.size
+        if display_mode == 'fill':
+            scale = max(target_width / img_w, target_height / img_h)
+            nw, nh = int(img_w * scale), int(img_h * scale)
+            resized = image.resize((nw, nh), Image.Resampling.LANCZOS)
+            left = (nw - target_width) // 2
+            top = (nh - target_height) // 2
+            return resized.crop((left, top, left + target_width, top + target_height))
+        else:
+            scale = min(target_width / img_w, target_height / img_h)
+            nw, nh = int(img_w * scale), int(img_h * scale)
+            resized = image.resize((nw, nh), Image.Resampling.LANCZOS)
+            new_img = Image.new("RGB", (target_width, target_height), (255, 255, 255))
+            new_img.paste(resized, ((target_width - nw) // 2, (target_height - nh) // 2))
+            return new_img
+
+    def convert_image(img, dithering_strength=1.0):
+        return np.array(img.convert('RGB'))
 
 # So PIL can open the HEIC that iPhones produce
 register_heif_opener()
