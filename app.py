@@ -412,10 +412,10 @@ def ota_cancel():
 def ota_check():
     """Device endpoint to check if an OTA firmware update is staged."""
     staged = ota.get_staged_info()
-    return jsonify({
-        'available': staged is not None,
-        'staged': staged
-    })
+    # Keep the device probe deliberately small.  The frame only needs this
+    # boolean; metadata belongs to /ota/status and making it part of the probe
+    # needlessly increases the amount of JSON the firmware must parse.
+    return jsonify({'available': staged is not None})
 
 @app.route('/ota/binary', methods=['GET'])
 def ota_binary():

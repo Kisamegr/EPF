@@ -97,7 +97,7 @@ class OtaUpdateWebTests(unittest.TestCase):
         # Check when nothing staged
         res = self.client.get('/ota/check', headers=auth_headers)
         self.assertEqual(res.status_code, 200)
-        self.assertFalse(res.get_json()['available'])
+        self.assertEqual(res.get_json(), {'available': False})
 
         # Stage a binary via ota module
         dummy_content = b'DEVICE_OTA_PAYLOAD_TEST_123'
@@ -108,7 +108,7 @@ class OtaUpdateWebTests(unittest.TestCase):
         # Check available
         res = self.client.get('/ota/check', headers=auth_headers)
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.get_json()['available'])
+        self.assertEqual(res.get_json(), {'available': True})
 
         # Download binary stream
         res = self.client.get('/ota/binary', headers=auth_headers)

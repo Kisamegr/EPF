@@ -361,9 +361,9 @@ private:
     return true;
   }
 
-  // GET /ota/check: returns true only when an OTA update was triggered (device
-  // will restart). Returns false when no update is pending or on any error, so
-  // the caller can safely continue to the image-download path.
+  // GET /ota/check: returns true when an OTA update was staged and therefore
+  // attempted (the device restarts on success). Returns false when no update
+  // is pending or on a probe error.
   bool checkOtaAndUpdate()
   {
     if (!resolveServerUrl())
@@ -410,25 +410,27 @@ private:
       return false;
     }
 
-    // Only extract the "available" boolean. The "staged" field may contain a
-    // 64-char SHA-256, filename, size, and timestamp — well over 128 bytes.
-    // The filter tells ArduinoJson to skip every key except "available".
-    // Both documents need at least JSON_OBJECT_SIZE(1) = 16 bytes; use 64 to
-    // be safe against ArduinoJson version differences.
-    // Use getString() rather than the stream so the connection is fully drained
-    // and closed before we open the /ota/binary connection.
+    // The endpoint intentionally returns only {"available":true|false}, so a
+    // small fixed document is sufficient and cannot fail because staged
+    // metadata grows. Use getString() rather than the stream so the connection
+    // is fully drained and closed before we open the /ota/binary connection.
     String body = http.getString();
     http.end();
 
-    StaticJsonDocument<64> filter;
-    filter["available"] = true;
-    StaticJsonDocument<64> doc;
-    DeserializationError err = deserializeJson(doc, body,
-                                               DeserializationOption::Filter(filter));
+    StaticJsonDocument<128> doc;
+    DeserializationError err = deserializeJson(doc, body);
 
-    if (err || !doc["available"].is<bool>())
+    if (err)
     {
-      Serial.printf("[OTA] /ota/check parse failed (%s) — skipping OTA probe\n", err.c_str());
+      Serial.printf("[OTA] /ota/check parse failed (%s, %u bytes) — skipping OTA probe\n",
+                    err.c_str(), body.length());
+      return false;
+    }
+
+    if (!doc["available"].is<bool>())
+    {
+      Serial.printf("[OTA] /ota/check response has no boolean 'available' field (%u bytes) — skipping OTA probe\n",
+                    body.length());
       return false;
     }
 
@@ -440,7 +442,7 @@ private:
 
     Serial.println(F("[OTA] Firmware update available. Starting OTA..."));
     performOtaUpdate(); // restarts on success; falls through on failure
-    return false;       // OTA failed; let caller decide what to do next
+    return true;        // OTA was attempted; caller must skip the image fetch
   }
 
   bool downloadImage()
@@ -1006,7 +1008,7 @@ public:
     Serial.println(F("Entering sleep mode"));
     hibernate(requestedSleepSeconds);
 #else
-    showStatus("Prototype ready", "Logic path complete");
+    showStatus("Prototype ready", "Logic complete!!!");
 #endif
   }
 
