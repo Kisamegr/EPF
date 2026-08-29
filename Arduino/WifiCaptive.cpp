@@ -241,6 +241,10 @@ bool WifiCaptive::startPortal()
     // begin serving
     _settingsServer->start();
 
+    // Repeat this while the portal is open so native USB CDC monitors that
+    // attach after boot still receive the password.
+    Serial.printf("Provisioning AP: %s; password: %s\n", WIFI_SSID, apPassword.c_str());
+
     // start async network scan
     WiFi.scanNetworks(true);
 
@@ -249,9 +253,16 @@ bool WifiCaptive::startPortal()
     bool succesfullyConnected = false;
     // wait until SSID is provided
     unsigned long startTime = millis();
+    unsigned long lastProvisioningLog = startTime;
     while (1)
     {
         _dnsServer->processNextRequest();
+
+        if (millis() - lastProvisioningLog >= 5000)
+        {
+            Serial.printf("Provisioning AP: %s; password: %s\n", WIFI_SSID, apPassword.c_str());
+            lastProvisioningLog = millis();
+        }
 
         // Check for timeout
         if (millis() - startTime >= CONFIG_TIMEOUT)

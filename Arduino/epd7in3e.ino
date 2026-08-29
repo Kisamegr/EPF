@@ -92,6 +92,7 @@ private:
 #if EPF_USE_EPAPER
   static int glyphIndex(char character)
   {
+    if (character >= 'a' && character <= 'z') character -= ('a' - 'A');
     if (character >= 'A' && character <= 'Z') return character - 'A';
     if (character >= '2' && character <= '9') return 26 + character - '2';
     if (character == '-') return 34;
@@ -137,13 +138,14 @@ private:
     const String password = WifiCaptive::provisioningPassword();
     const String heading = "EPF SETUP";
     const String ssid = "SSID: EPF-SETUP";
+    const String passwordLabel = "PASSWORD";
     epd.SendCommand(0x10);
     for (int y = 0; y < EPD_HEIGHT; ++y)
     {
       for (int x = 0; x < EPD_WIDTH; x += 2)
       {
-        bool left = textPixel(heading, 180, 70, 12, x, y) || textPixel(ssid, 100, 220, 7, x, y) || textPixel(password, 40, 320, 6, x, y);
-        bool right = textPixel(heading, 180, 70, 12, x + 1, y) || textPixel(ssid, 100, 220, 7, x + 1, y) || textPixel(password, 40, 320, 6, x + 1, y);
+        bool left = textPixel(heading, 180, 70, 12, x, y) || textPixel(ssid, 100, 220, 7, x, y) || textPixel(passwordLabel, 40, 270, 5, x, y) || textPixel(password, 40, 320, 6, x, y);
+        bool right = textPixel(heading, 180, 70, 12, x + 1, y) || textPixel(ssid, 100, 220, 7, x + 1, y) || textPixel(passwordLabel, 40, 270, 5, x + 1, y) || textPixel(password, 40, 320, 6, x + 1, y);
         epd.SendData((left ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE) << 4 | (right ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE));
       }
     }
